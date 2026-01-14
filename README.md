@@ -26,4 +26,3 @@ pio run -e esp32dev -t upload
 ```bash
 pio run -e esp32dev_ota -t upload
 ```
-
