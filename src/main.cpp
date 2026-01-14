@@ -2918,13 +2918,12 @@ void handleWebInterface() {
   File file = SPIFFS.open("/index.html", "r");
   if (file) {
     // Заголовки для оптимизации загрузки
-    server.sendHeader("Cache-Control", "public, max-age=3600");  // Кеш на 1 час
+    server.sendHeader("Cache-Control", "public, max-age=86400");  // Кеш на 24 часа
     server.sendHeader("Connection", "keep-alive");  // Keep-alive для быстрых последующих запросов
-    server.sendHeader("Content-Encoding", "identity");  // Явно указываем отсутствие сжатия
+    server.sendHeader("Content-Type", "text/html; charset=utf-8");
     
-    // Увеличиваем размер буфера для более быстрой передачи
-    // Потоковая передача файла (не загружает весь файл в память)
-    // streamFile автоматически обрабатывает большие файлы по частям
+    // Потоковая передача файла (оптимизировано для больших файлов)
+    // streamFile автоматически обрабатывает файлы по частям, не загружая весь файл в память
     server.streamFile(file, "text/html; charset=utf-8");
     file.close();
     return;
