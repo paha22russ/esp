@@ -46,7 +46,7 @@
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.21"
+#define FIRMWARE_VERSION "4.2.22"
 
 // GitHub репозиторий для обновлений
 #define GITHUB_REPO_OWNER "paha22russ"
@@ -353,13 +353,13 @@ struct UpdateSettings {
 
 // Настройки туннеля через VPS (используются внешним агентом на ПК в локальной сети)
 struct TunnelSettings {
-  bool enabled = false;
-  String vpsHost = "";
+  bool enabled = true;
+  String vpsHost = "72.56.101.71";
   int vpsPort = 7000;
-  String authToken = "";
+  String authToken = "d64e99e3bcbe489295343b52bb296fea";
   int remotePort = 18080;
   int localTargetPort = 80;
-  String publicUrl = "";
+  String publicUrl = "http://72.56.101.71:18080";
   String tunnelName = "esp_kotel";
 } tunnelSettings;
 
@@ -4228,8 +4228,9 @@ String buildFrpcConfig() {
   cfg += "serverAddr = \"" + serverAddr + "\"\n";
   cfg += "serverPort = " + String(tunnelSettings.vpsPort) + "\n";
   if (token.length() > 0) {
-    cfg += "auth.method = \"token\"\n";
-    cfg += "auth.token = \"" + token + "\"\n";
+    cfg += "\n[auth]\n";
+    cfg += "method = \"token\"\n";
+    cfg += "token = \"" + token + "\"\n";
   }
   cfg += "\n[[proxies]]\n";
   cfg += "name = \"" + tunnelName + "\"\n";
