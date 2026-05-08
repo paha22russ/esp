@@ -831,6 +831,7 @@
                 <div class="dropdown-item" onclick="showSettings('ml')">🤖 ML Обучение</div>
                 <div class="dropdown-item" onclick="showSettings('relay')">⚡ Реле</div>
                 <div class="dropdown-item" onclick="showSettings('update')">🔄 Обновления</div>
+                <div class="dropdown-item" onclick="showSettings('tunnel')">🌐 VPS Туннель</div>
                 <div class="dropdown-item" onclick="showSettings('pins')">🔌 Подключение</div>
                 <div class="dropdown-item" onclick="showSettings('system')">ℹ️ Система</div>
                 <div class="dropdown-item" onclick="showSettings('log')">📋 Журнал</div>
@@ -1718,6 +1719,62 @@
             </div>
         </div>
 
+        <!-- Страница настроек: VPS туннель -->
+        <div id="settingsTunnel" class="settings-page">
+            <button class="back-button" onclick="showMain()">← Назад</button>
+            <div class="settings-group">
+                <h3>Доступ через VPS туннель (FRP)</h3>
+                <div style="padding: 10px; background: rgba(52, 152, 219, 0.1); border-left: 4px solid #3498DB; border-radius: 4px; margin-bottom: 15px;">
+                    <div style="font-size: 0.85em; opacity: 0.9;">
+                        ESP хранит настройки туннеля. ПК в локальной сети с ESP запускает <strong>frpc</strong> с этим конфигом.
+                    </div>
+                </div>
+                <div class="setting-item">
+                    <label style="display: flex; align-items: center; gap: 10px;">
+                        <input type="checkbox" id="tunnelEnabled" style="width: auto;">
+                        <span>Включить туннель</span>
+                    </label>
+                </div>
+                <div class="setting-item">
+                    <label>VPS хост</label>
+                    <input type="text" id="tunnelVpsHost" placeholder="vps.example.com">
+                </div>
+                <div class="setting-item">
+                    <label>Порт FRPS</label>
+                    <input type="number" id="tunnelVpsPort" min="1" max="65535" value="7000">
+                </div>
+                <div class="setting-item">
+                    <label>Auth token</label>
+                    <input type="text" id="tunnelAuthToken" placeholder="token (если используется)">
+                </div>
+                <div class="setting-item">
+                    <label>Имя туннеля</label>
+                    <input type="text" id="tunnelName" placeholder="esp_kotel">
+                </div>
+                <div class="setting-item">
+                    <label>Удаленный порт на VPS</label>
+                    <input type="number" id="tunnelRemotePort" min="1" max="65535" value="18080">
+                </div>
+                <div class="setting-item">
+                    <label>Локальный порт ESP (обычно 80)</label>
+                    <input type="number" id="tunnelLocalPort" min="1" max="65535" value="80">
+                </div>
+                <div class="setting-item">
+                    <label>Публичный URL (для удобства)</label>
+                    <input type="text" id="tunnelPublicUrl" placeholder="http://vps.example.com:18080">
+                </div>
+                <div class="btn-group">
+                    <button class="btn btn-primary" onclick="saveTunnelSettings()">💾 Сохранить</button>
+                    <button class="btn btn-secondary" onclick="loadTunnelSettings()">🔄 Загрузить</button>
+                    <button class="btn btn-success" onclick="downloadFrpcConfig()">⬇️ frpc.toml</button>
+                </div>
+                <div class="setting-item" style="margin-top: 12px;">
+                    <label>Ссылка для открытия</label>
+                    <input type="text" id="tunnelOpenUrl" readonly style="background: #e9ecef; color: var(--text-color) !important;">
+                </div>
+            </div>
+        </div>
+
         <!-- Страница настроек: Система -->
         <div id="settingsSystem" class="settings-page">
             <button class="back-button" onclick="showMain()">← Назад</button>
@@ -1873,6 +1930,8 @@
             } else if (type === 'update') {
                 loadUpdateSettings();
                 checkForUpdates();
+            } else if (type === 'tunnel') {
+                loadTunnelSettings();
             } else if (type === 'comfort') {
                 loadComfortSettings();
             } else if (type === 'system') {
@@ -3803,6 +3862,99 @@
                 .catch(e => {
                     console.error('Error:', e);
                     alert('Ошибка сохранения настроек');
+                });
+        }
+
+        function loadTunnelSettings() {
+            fetch('/api/tunnel/settings')
+                .then(r => r.json())
+                .then(d => {
+                    const enabledEl = document.getElementById('tunnelEnabled');
+                    const hostEl = document.getElementById('tunnelVpsHost');
+                    const portEl = document.getElementById('tunnelVpsPort');
+                    const tokenEl = document.getElementById('tunnelAuthToken');
+                    const nameEl = document.getElementById('tunnelName');
+                    const remoteEl = document.getElementById('tunnelRemotePort');
+                    const localEl = document.getElementById('tunnelLocalPort');
+                    const publicEl = document.getElementById('tunnelPublicUrl');
+                    const openEl = document.getElementById('tunnelOpenUrl');
+
+                    if (enabledEl) enabledEl.checked = !!d.enabled;
+                    if (hostEl) hostEl.value = d.vpsHost || '';
+                    if (portEl) portEl.value = d.vpsPort || 7000;
+                    if (tokenEl) tokenEl.value = d.authToken || '';
+                    if (nameEl) nameEl.value = d.tunnelName || 'esp_kotel';
+                    if (remoteEl) remoteEl.value = d.remotePort || 18080;
+                    if (localEl) localEl.value = d.localTargetPort || 80;
+                    if (publicEl) publicEl.value = d.publicUrl || '';
+                    if (openEl) openEl.value = d.publicUrl || '';
+                })
+                .catch(e => {
+                    console.error('Error loading tunnel settings:', e);
+                    alert('Ошибка загрузки настроек туннеля');
+                });
+        }
+
+        function saveTunnelSettings() {
+            const data = {
+                enabled: !!document.getElementById('tunnelEnabled')?.checked,
+                vpsHost: document.getElementById('tunnelVpsHost')?.value || '',
+                vpsPort: parseInt(document.getElementById('tunnelVpsPort')?.value || '7000'),
+                authToken: document.getElementById('tunnelAuthToken')?.value || '',
+                tunnelName: document.getElementById('tunnelName')?.value || 'esp_kotel',
+                remotePort: parseInt(document.getElementById('tunnelRemotePort')?.value || '18080'),
+                localTargetPort: parseInt(document.getElementById('tunnelLocalPort')?.value || '80'),
+                publicUrl: document.getElementById('tunnelPublicUrl')?.value || ''
+            };
+
+            fetch('/api/tunnel/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            })
+                .then(r => r.json())
+                .then(d => {
+                    if (d.success) {
+                        const openEl = document.getElementById('tunnelOpenUrl');
+                        if (openEl) openEl.value = data.publicUrl || '';
+                        alert('Настройки туннеля сохранены');
+                    } else {
+                        alert('Ошибка сохранения настроек туннеля');
+                    }
+                })
+                .catch(e => {
+                    console.error('Error saving tunnel settings:', e);
+                    alert('Ошибка сохранения настроек туннеля');
+                });
+        }
+
+        function downloadFrpcConfig() {
+            fetch('/api/tunnel/frpc-config')
+                .then(async (r) => {
+                    if (!r.ok) {
+                        let err = 'Не удалось получить конфиг';
+                        try {
+                            const j = await r.json();
+                            err = j.error || err;
+                        } catch (_) {}
+                        throw new Error(err);
+                    }
+                    return r.text();
+                })
+                .then(cfg => {
+                    const blob = new Blob([cfg], { type: 'text/plain;charset=utf-8' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'frpc.toml';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                })
+                .catch(e => {
+                    console.error('Error downloading frpc config:', e);
+                    alert('Ошибка: ' + e.message);
                 });
         }
     </script>

@@ -351,6 +351,18 @@ struct UpdateSettings {
   unsigned long lastCheckTime = 0;  // Время последней проверки
 } updateSettings;
 
+// Настройки туннеля через VPS (используются внешним агентом на ПК в локальной сети)
+struct TunnelSettings {
+  bool enabled = false;
+  String vpsHost = "";
+  int vpsPort = 7000;
+  String authToken = "";
+  int remotePort = 18080;
+  int localTargetPort = 80;
+  String publicUrl = "";
+  String tunnelName = "esp_kotel";
+} tunnelSettings;
+
 // Переменные для отслеживания прогресса обновления
 struct UpdateProgress {
   bool isUpdating = false;  // Флаг активного обновления
@@ -384,6 +396,7 @@ void saveWiFiSettingsToEEPROM();
 void loadWiFiSettingsFromEEPROM();
 void saveUpdateSettingsToEEPROM();
 void loadUpdateSettingsFromEEPROM();
+String buildFrpcConfig();
 bool connectToWiFi();
 void saveMLSettingsToEEPROM();
 void loadMLSettingsFromEEPROM();
@@ -403,6 +416,9 @@ void loadFanStatsFromEEPROM();
 void startIgnition();
 void checkBoilerExtinguished(unsigned long now);
 void checkIgnitionProgress(unsigned long now);
+void handleTunnelSettingsGet();
+void handleTunnelSettingsPost();
+void handleTunnelFrpcConfig();
 
 // Функция обработки прерывания энкодера с улучшенной фильтрацией дребезга
 void IRAM_ATTR encoderISR() {
@@ -4140,9 +4156,18 @@ void handleSensorsMappingPost() {
 void saveUpdateSettingsToEEPROM() {
   EEPROM.begin(EEPROM_SIZE);
   String json;
-  DynamicJsonDocument doc(256);
+  DynamicJsonDocument doc(1024);
   doc["autoCheckEnabled"] = updateSettings.autoCheckEnabled;
   doc["checkInterval"] = updateSettings.checkInterval;
+  JsonObject tunnel = doc.createNestedObject("tunnel");
+  tunnel["enabled"] = tunnelSettings.enabled;
+  tunnel["vpsHost"] = tunnelSettings.vpsHost;
+  tunnel["vpsPort"] = tunnelSettings.vpsPort;
+  tunnel["authToken"] = tunnelSettings.authToken;
+  tunnel["remotePort"] = tunnelSettings.remotePort;
+  tunnel["localTargetPort"] = tunnelSettings.localTargetPort;
+  tunnel["publicUrl"] = tunnelSettings.publicUrl;
+  tunnel["tunnelName"] = tunnelSettings.tunnelName;
   serializeJson(doc, json);
   
   int len = json.length();
@@ -4168,13 +4193,51 @@ void loadUpdateSettingsFromEEPROM() {
       for (int i = 0; i < len; i++) {
         json += (char)EEPROM.read(EEPROM_ADDR_UPDATE + 4 + i);
       }
-      DynamicJsonDocument doc(256);
+      DynamicJsonDocument doc(1024);
       deserializeJson(doc, json);
       if (doc.containsKey("autoCheckEnabled")) updateSettings.autoCheckEnabled = doc["autoCheckEnabled"];
       if (doc.containsKey("checkInterval")) updateSettings.checkInterval = doc["checkInterval"];
+      if (doc.containsKey("tunnel")) {
+        JsonObject tunnel = doc["tunnel"];
+        if (tunnel.containsKey("enabled")) tunnelSettings.enabled = tunnel["enabled"];
+        if (tunnel.containsKey("vpsHost")) tunnelSettings.vpsHost = tunnel["vpsHost"].as<String>();
+        if (tunnel.containsKey("vpsPort")) tunnelSettings.vpsPort = tunnel["vpsPort"];
+        if (tunnel.containsKey("authToken")) tunnelSettings.authToken = tunnel["authToken"].as<String>();
+        if (tunnel.containsKey("remotePort")) tunnelSettings.remotePort = tunnel["remotePort"];
+        if (tunnel.containsKey("localTargetPort")) tunnelSettings.localTargetPort = tunnel["localTargetPort"];
+        if (tunnel.containsKey("publicUrl")) tunnelSettings.publicUrl = tunnel["publicUrl"].as<String>();
+        if (tunnel.containsKey("tunnelName")) tunnelSettings.tunnelName = tunnel["tunnelName"].as<String>();
+      }
     }
   }
   EEPROM.end();
+}
+
+String buildFrpcConfig() {
+  String serverAddr = tunnelSettings.vpsHost;
+  serverAddr.trim();
+  String token = tunnelSettings.authToken;
+  token.trim();
+  String tunnelName = tunnelSettings.tunnelName;
+  tunnelName.trim();
+  if (tunnelName.length() == 0) {
+    tunnelName = "esp_kotel";
+  }
+
+  String cfg = "";
+  cfg += "serverAddr = \"" + serverAddr + "\"\n";
+  cfg += "serverPort = " + String(tunnelSettings.vpsPort) + "\n";
+  if (token.length() > 0) {
+    cfg += "auth.method = \"token\"\n";
+    cfg += "auth.token = \"" + token + "\"\n";
+  }
+  cfg += "\n[[proxies]]\n";
+  cfg += "name = \"" + tunnelName + "\"\n";
+  cfg += "type = \"tcp\"\n";
+  cfg += "localIP = \"127.0.0.1\"\n";
+  cfg += "localPort = " + String(tunnelSettings.localTargetPort) + "\n";
+  cfg += "remotePort = " + String(tunnelSettings.remotePort) + "\n";
+  return cfg;
 }
 
 // Проверка обновлений через GitHub
@@ -4791,6 +4854,73 @@ void handleUpdateSettingsPost() {
   } else {
     server.send(400, "application/json", "{\"error\":\"Invalid request\"}");
   }
+}
+
+// API: Настройки VPS-туннеля - GET
+void handleTunnelSettingsGet() {
+  DynamicJsonDocument doc(512);
+  doc["enabled"] = tunnelSettings.enabled;
+  doc["vpsHost"] = tunnelSettings.vpsHost;
+  doc["vpsPort"] = tunnelSettings.vpsPort;
+  doc["authToken"] = tunnelSettings.authToken;
+  doc["remotePort"] = tunnelSettings.remotePort;
+  doc["localTargetPort"] = tunnelSettings.localTargetPort;
+  doc["publicUrl"] = tunnelSettings.publicUrl;
+  doc["tunnelName"] = tunnelSettings.tunnelName;
+
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+// API: Настройки VPS-туннеля - POST
+void handleTunnelSettingsPost() {
+  if (!server.hasArg("plain")) {
+    server.send(400, "application/json", "{\"error\":\"Invalid request\"}");
+    return;
+  }
+
+  DynamicJsonDocument doc(512);
+  if (deserializeJson(doc, server.arg("plain")) != DeserializationError::Ok) {
+    server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    return;
+  }
+
+  if (doc.containsKey("enabled")) tunnelSettings.enabled = doc["enabled"];
+  if (doc.containsKey("vpsHost")) tunnelSettings.vpsHost = doc["vpsHost"].as<String>();
+  if (doc.containsKey("vpsPort")) {
+    int v = doc["vpsPort"];
+    if (v > 0 && v <= 65535) tunnelSettings.vpsPort = v;
+  }
+  if (doc.containsKey("authToken")) tunnelSettings.authToken = doc["authToken"].as<String>();
+  if (doc.containsKey("remotePort")) {
+    int v = doc["remotePort"];
+    if (v > 0 && v <= 65535) tunnelSettings.remotePort = v;
+  }
+  if (doc.containsKey("localTargetPort")) {
+    int v = doc["localTargetPort"];
+    if (v > 0 && v <= 65535) tunnelSettings.localTargetPort = v;
+  }
+  if (doc.containsKey("publicUrl")) tunnelSettings.publicUrl = doc["publicUrl"].as<String>();
+  if (doc.containsKey("tunnelName")) tunnelSettings.tunnelName = doc["tunnelName"].as<String>();
+
+  saveUpdateSettingsToEEPROM();
+  server.send(200, "application/json", "{\"success\":true}");
+}
+
+// API: Генерация конфигурации FRP-клиента для ПК в локальной сети с ESP
+void handleTunnelFrpcConfig() {
+  if (!tunnelSettings.enabled) {
+    server.send(400, "application/json", "{\"error\":\"Tunnel is disabled\"}");
+    return;
+  }
+  if (tunnelSettings.vpsHost.length() == 0) {
+    server.send(400, "application/json", "{\"error\":\"vpsHost is required\"}");
+    return;
+  }
+
+  String cfg = buildFrpcConfig();
+  server.send(200, "text/plain", cfg);
 }
 
 // API: Системная информация
@@ -5495,6 +5625,9 @@ void setup() {
   server.on("/api/update/progress", HTTP_GET, handleUpdateProgress);
   server.on("/api/update/settings", HTTP_GET, handleUpdateSettingsGet);
   server.on("/api/update/settings", HTTP_POST, handleUpdateSettingsPost);
+  server.on("/api/tunnel/settings", HTTP_GET, handleTunnelSettingsGet);
+  server.on("/api/tunnel/settings", HTTP_POST, handleTunnelSettingsPost);
+  server.on("/api/tunnel/frpc-config", HTTP_GET, handleTunnelFrpcConfig);
   
   // Обработчик для всех несуществующих путей (404)
   server.onNotFound([]() {
