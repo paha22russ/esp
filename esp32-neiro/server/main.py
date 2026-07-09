@@ -91,6 +91,7 @@ class TelemetryPayload(BaseModel):
 
     device_id: str
     uptime_ms: int = 0
+    firmware_version: str = ""
     gpio: list[dict[str, Any]] = Field(default_factory=list)
     i2c_devices: list[str] = Field(default_factory=list)
 
@@ -162,6 +163,7 @@ async def api_telemetry(payload: TelemetryPayload) -> JSONResponse:
     new_i2c, removed_i2c = app_state.update_device(
         device_id=device_id,
         uptime_ms=payload.uptime_ms,
+        firmware_version=payload.firmware_version,
         gpio=payload.gpio,
         i2c_devices=payload.i2c_devices,
     )
@@ -408,6 +410,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
       <section class="bg-slate-900 rounded-xl border border-slate-800 p-4 text-xs text-slate-500 space-y-1">
         <p>Очередь команд: <span id="pendingCmds" class="text-sky-400">0</span></p>
+        <p>Прошивка: <span id="fwVersion" class="text-emerald-400">—</span></p>
         <p>Device ID: <span id="deviceId" class="text-slate-400 font-mono">—</span></p>
         <p>LLM: <span id="llmProvider" class="text-violet-400">—</span></p>
       </section>
@@ -464,6 +467,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
 
       document.getElementById('deviceId').textContent = data.device_id || '—';
+      document.getElementById('fwVersion').textContent = data.firmware_version || 'старая (нет blink)';
       document.getElementById('uptime').textContent = formatUptime(data.uptime_ms);
       document.getElementById('pendingCmds').textContent = data.pending_commands || 0;
 

@@ -44,6 +44,7 @@ class DeviceState:
     uptime_ms: int = 0
     gpio: list[dict[str, Any]] = field(default_factory=list)
     i2c_devices: list[str] = field(default_factory=list)
+    firmware_version: str = ""
     online: bool = False
 
 
@@ -163,6 +164,7 @@ class AppState:
         self,
         device_id: str,
         uptime_ms: int,
+        firmware_version: str,
         gpio: list[dict[str, Any]],
         i2c_devices: list[str],
     ) -> tuple[set[str], set[str]]:
@@ -178,10 +180,12 @@ class AppState:
         removed_devices = prev - current
         self._prev_i2c[device_id] = current
 
+        prev_fw = self.devices[device_id].firmware_version if device_id in self.devices else ""
         self.devices[device_id] = DeviceState(
             device_id=device_id,
             last_seen=now,
             uptime_ms=uptime_ms,
+            firmware_version=firmware_version or prev_fw,
             gpio=gpio,
             i2c_devices=i2c_devices,
             online=True,
@@ -210,6 +214,7 @@ class AppState:
             "online": device.online if device else False,
             "last_seen": device.last_seen if device else 0,
             "uptime_ms": device.uptime_ms if device else 0,
+            "firmware_version": device.firmware_version if device else "",
             "gpio": device.gpio if device else [],
             "i2c_devices": device.i2c_devices if device else [],
             "activity_log": list(self.activity_log),

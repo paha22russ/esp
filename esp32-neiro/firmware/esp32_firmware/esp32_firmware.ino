@@ -39,6 +39,9 @@
 // API-токен по умолчанию (должен совпадать с ESP32_API_TOKEN в .env сервера)
 #define DEFAULT_API_TOKEN "esp32-neiro-change-me"
 
+// Версия прошивки (отображается в дашборде)
+#define FIRMWARE_VERSION "1.2.0"
+
 // Таймаут HTTP-запроса телеметрии (мс) — не ждём долгий ответ LLM
 #define HTTP_TIMEOUT_MS  3000
 
@@ -402,9 +405,9 @@ void executeCommands(JsonArray &commands) {
     }
     else if (strcmp(type, "blink") == 0) {
       int pin = cmd["pin"] | 2;
-      float hz = cmd["hz"] | 1.0f;
-      unsigned long durationMs = cmd["duration_ms"] | 60000;
-      bool activeLow = cmd["active_low"] | (pin == 2);
+      float hz = cmd["hz"].isNull() ? 1.0f : cmd["hz"].as<float>();
+      unsigned long durationMs = cmd["duration_ms"] | 60000UL;
+      bool activeLow = cmd["active_low"].isNull() ? (pin == 2) : cmd["active_low"].as<bool>();
       startBlink((uint8_t)pin, hz, durationMs, activeLow);
     }
     else if (strcmp(type, "init_display") == 0) {
@@ -429,6 +432,9 @@ void executeCommands(JsonArray &commands) {
       delay(200);
       ESP.restart();
     }
+    else {
+      Serial.printf("[CMD] неизвестная команда: %s\n", type);
+    }
   }
 }
 
@@ -445,6 +451,7 @@ void sendTelemetry() {
   StaticJsonDocument<4096> doc;
   doc["device_id"] = WiFi.macAddress();
   doc["uptime_ms"] = millis();
+  doc["firmware_version"] = FIRMWARE_VERSION;
 
   JsonArray gpio = doc.createNestedArray("gpio");
   collectGpioTelemetry(gpio);
@@ -467,9 +474,11 @@ void sendTelemetry() {
   if (code > 0) {
     String response = http.getString();
     if (code == 200 && response.length() > 0) {
-      StaticJsonDocument<2048> respDoc;
+      StaticJsonDocument<4096> respDoc;
       DeserializationError err = deserializeJson(respDoc, response);
-      if (!err && respDoc.containsKey("commands")) {
+      if (err) {
+        Serial.printf("[HTTP] JSON parse error: %s\n", err.c_str());
+      } else if (respDoc.containsKey("commands")) {
         JsonArray commands = respDoc["commands"].as<JsonArray>();
         executeCommands(commands);
       }
