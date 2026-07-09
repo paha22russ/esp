@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -370,6 +371,46 @@ def _call_with_auto_fallback(system: str, user_message: str) -> tuple[str, list[
         return _call_ollama(system, user_message)
 
 
+def _invoke_llm(provider: str, system: str, full_user: str) -> tuple[str, list[dict[str, Any]]]:
+    """Синхронный вызов LLM по провайдеру (запускать через asyncio.to_thread)."""
+    if provider == "auto":
+        return _call_with_auto_fallback(system, full_user)
+
+    if provider == "google":
+        return _call_gemini(system, full_user)
+
+    if provider == "ollama":
+        return _call_ollama(system, full_user)
+
+    if provider == "openai":
+        return _call_openai_compatible(
+            base_url=None,
+            api_key=os.getenv("OPENAI_API_KEY", ""),
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            system=system,
+            user_message=full_user,
+            provider_label=f"OpenAI ({os.getenv('OPENAI_MODEL', 'gpt-4o-mini')})",
+        )
+
+    if provider == "anthropic":
+        from anthropic import Anthropic
+
+        client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-haiku-latest")
+
+        response = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            system=system,
+            messages=[{"role": "user", "content": full_user}],
+            tools=_anthropic_tools(),
+        )
+        app_state.active_llm_provider = f"Anthropic ({model})"
+        return _parse_anthropic_response(response)
+
+    raise ValueError(f"Неизвестный LLM_PROVIDER: {provider}")
+
+
 async def run_llm_agent(
     user_message: str,
     device_id: str | None = None,
@@ -401,52 +442,17 @@ async def run_llm_agent(
     commands: list[dict[str, Any]] = []
 
     try:
-        if provider == "auto":
-            reasoning, commands = _call_with_auto_fallback(system, full_user)
-
-        elif provider == "google":
-            reasoning, commands = _call_gemini(system, full_user)
-
-        elif provider == "ollama":
-            reasoning, commands = _call_ollama(system, full_user)
-
-        elif provider == "openai":
-            reasoning, commands = _call_openai_compatible(
-                base_url=None,
-                api_key=os.getenv("OPENAI_API_KEY", ""),
-                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-                system=system,
-                user_message=full_user,
-                provider_label=f"OpenAI ({os.getenv('OPENAI_MODEL', 'gpt-4o-mini')})",
-            )
-
-        elif provider == "anthropic":
-            from anthropic import Anthropic
-
-            client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-            model = os.getenv("ANTHROPIC_MODEL", "claude-3-5-haiku-latest")
-
-            response = client.messages.create(
-                model=model,
-                max_tokens=1024,
-                system=system,
-                messages=[{"role": "user", "content": full_user}],
-                tools=_anthropic_tools(),
-            )
-            app_state.active_llm_provider = f"Anthropic ({model})"
-            reasoning, commands = _parse_anthropic_response(response)
-
-        else:
-            app_state.add_log(f"Неизвестный LLM_PROVIDER: {provider}", "error")
-            return []
-
+        reasoning, commands = await asyncio.to_thread(_invoke_llm, provider, system, full_user)
+    except ValueError as exc:
+        app_state.add_log(str(exc), "error")
+        return []
     except Exception as exc:
         # Если auto уже пробовал fallback внутри — сюда попадут только фатальные ошибки
         if provider == "auto" and not app_state.gemini_fallback_active:
             try:
                 app_state.gemini_fallback_active = True
                 app_state.add_log(f"Gemini недоступен, пробую Ollama… ({exc})", "warn")
-                reasoning, commands = _call_ollama(system, full_user)
+                reasoning, commands = await asyncio.to_thread(_call_ollama, system, full_user)
             except Exception as ollama_exc:
                 app_state.add_log(f"Ошибка Ollama: {ollama_exc}", "error")
                 app_state.add_thought(f"Оба провайдера недоступны. Ollama: {ollama_exc}", "error")
