@@ -70,6 +70,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 | `OLLAMA_MODEL` | `qwen2.5-coder:7b` / `14b` / `3b` |
 | `HOST` | `0.0.0.0` |
 | `PORT` | `8000` |
+| `ESP32_API_TOKEN` | Токен для ESP32 и дашборда (заголовок `X-API-Token`) |
 
 ### Ollama на homeserv
 

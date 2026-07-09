@@ -20,11 +20,12 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
+from auth import get_configured_token, verify_api_token
 from llm_agent import analyze_i2c_change, run_llm_agent
 from state import app_state
 
@@ -33,6 +34,31 @@ load_dotenv()
 
 # Таймаут «онлайн» для ESP32 (секунды без телеметрии = offline)
 DEVICE_OFFLINE_SEC = 15
+
+
+# --- Фоновые задачи LLM (не блокируют телеметрию ESP32) ---
+
+
+async def _bg_analyze_i2c(device_id: str, new_devices: set[str], removed_devices: set[str]) -> None:
+    """Фоновый вызов LLM при изменении I2C-шины."""
+    try:
+        commands = await analyze_i2c_change(device_id, new_devices, removed_devices)
+        if commands:
+            app_state.enqueue_commands(device_id, commands)
+    except Exception as exc:
+        app_state.add_log(f"Ошибка фонового LLM (I2C): {exc}", "error")
+    await app_state.notify_sse()
+
+
+async def _bg_direct_command(device_id: str | None, message: str) -> None:
+    """Фоновый вызов LLM для прямого приказа оператора."""
+    try:
+        commands = await run_llm_agent(message, device_id=device_id, trigger="direct")
+        if device_id and commands:
+            app_state.enqueue_commands(device_id, commands)
+    except Exception as exc:
+        app_state.add_log(f"Ошибка фонового LLM (приказ): {exc}", "error")
+    await app_state.notify_sse()
 
 
 # --- Pydantic-модели запросов ---
@@ -101,12 +127,12 @@ app = FastAPI(
 # ==================== API эндпоинты ====================
 
 
-@app.post("/api/telemetry")
+@app.post("/api/telemetry", dependencies=[Depends(verify_api_token)])
 async def api_telemetry(payload: TelemetryPayload) -> JSONResponse:
     """
     Принять телеметрию от ESP32, обновить состояние, вернуть очередь команд.
 
-    При изменении I2C-шины автоматически вызывается LLM (Dynamic Agent).
+    LLM вызывается в фоне — ответ ESP32 мгновенный (только очередь команд).
     """
     device_id = payload.device_id
     prev_dev = app_state.devices.get(device_id)
@@ -124,19 +150,17 @@ async def api_telemetry(payload: TelemetryPayload) -> JSONResponse:
             "success",
         )
 
-    # Dynamic Agent: реагируем на hot-plug I2C
+    # Dynamic Agent: I2C hot-plug → LLM в фоне (не блокируем ESP32)
     if new_i2c or removed_i2c:
-        llm_commands = await analyze_i2c_change(device_id, new_i2c, removed_i2c)
-        if llm_commands:
-            app_state.enqueue_commands(device_id, llm_commands)
+        asyncio.create_task(_bg_analyze_i2c(device_id, new_i2c, removed_i2c))
 
-    # Отдаём накопленную очередь команд ESP32
+    # Отдаём накопленную очередь команд ESP32 сразу
     commands = app_state.pop_commands(device_id)
     await app_state.notify_sse()
     return JSONResponse({"commands": commands})
 
 
-@app.post("/api/reboot_esp")
+@app.post("/api/reboot_esp", dependencies=[Depends(verify_api_token)])
 async def api_reboot_esp(payload: RebootPayload | None = None) -> JSONResponse:
     """Добавить команду перезагрузки ESP32 в очередь."""
     device_id = (payload.device_id if payload else None) or app_state.get_primary_device_id()
@@ -149,25 +173,19 @@ async def api_reboot_esp(payload: RebootPayload | None = None) -> JSONResponse:
     return JSONResponse({"ok": True, "device_id": device_id})
 
 
-@app.post("/api/direct_command")
+@app.post("/api/direct_command", dependencies=[Depends(verify_api_token)])
 async def api_direct_command(payload: DirectCommandPayload) -> JSONResponse:
-    """Отправить прямой текстовый приказ в нейросеть."""
+    """Отправить прямой текстовый приказ в нейросеть (LLM в фоне)."""
     device_id = payload.device_id or app_state.get_primary_device_id()
     app_state.add_log(f"Прямой приказ оператора: «{payload.message}»", "info")
 
-    commands = await run_llm_agent(
-        payload.message,
-        device_id=device_id,
-        trigger="direct",
-    )
-    if device_id and commands:
-        app_state.enqueue_commands(device_id, commands)
+    asyncio.create_task(_bg_direct_command(device_id, payload.message))
 
     await app_state.notify_sse()
-    return JSONResponse({"ok": True, "commands_queued": len(commands)})
+    return JSONResponse({"ok": True, "message": "Приказ принят, нейросеть думает в фоне…"})
 
 
-@app.post("/api/ai/reset")
+@app.post("/api/ai/reset", dependencies=[Depends(verify_api_token)])
 async def api_ai_reset() -> JSONResponse:
     """Сбросить контекст нейросети («Перезапустить сервер ИИ»)."""
     app_state.reset_ai()
@@ -181,7 +199,7 @@ async def get_prompt() -> JSONResponse:
     return JSONResponse({"prompt": app_state.system_prompt})
 
 
-@app.post("/api/settings/prompt")
+@app.post("/api/settings/prompt", dependencies=[Depends(verify_api_token)])
 async def set_prompt(payload: PromptPayload) -> JSONResponse:
     """Изменить системный промпт из браузера."""
     app_state.system_prompt = payload.prompt.strip()
@@ -357,6 +375,26 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </main>
 
   <script>
+    // API-токен (инжектируется сервером; пустой = без авторизации)
+    const API_TOKEN = __API_TOKEN_JSON__;
+
+    function authHeaders(extra) {
+      const h = Object.assign({'Content-Type': 'application/json'}, extra || {});
+      if (API_TOKEN) h['X-API-Token'] = API_TOKEN;
+      return h;
+    }
+
+    // Защита от XSS при вставке текста из лога/мыслей ИИ
+    function escapeHtml(str) {
+      if (str == null) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
     // --- Утилиты форматирования ---
     function formatUptime(ms) {
       if (!ms) return '—';
@@ -401,7 +439,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const logEl = document.getElementById('activityLog');
       if (data.activity_log && data.activity_log.length) {
         logEl.innerHTML = data.activity_log.map(e =>
-          `<p class="log-${e.level}">[${formatTime(e.ts)}] ${e.message}</p>`
+          `<p class="log-${escapeHtml(e.level)}">[${formatTime(e.ts)}] ${escapeHtml(e.message)}</p>`
         ).join('');
       }
 
@@ -411,7 +449,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         thoughtsEl.innerHTML = data.ai_thoughts.map(t =>
           `<div class="border-l-2 border-violet-600 pl-3">
             <span class="text-xs text-slate-500">${formatTime(t.ts)}</span>
-            <p class="text-slate-300 mt-0.5">${t.text}</p>
+            <p class="text-slate-300 mt-0.5">${escapeHtml(t.text)}</p>
           </div>`
         ).join('');
       }
@@ -420,7 +458,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const i2cEl = document.getElementById('i2cList');
       if (data.i2c_devices && data.i2c_devices.length) {
         i2cEl.innerHTML = data.i2c_devices.map(a =>
-          `<span class="px-2 py-1 rounded bg-emerald-900/40 border border-emerald-700 text-emerald-300 text-xs font-mono">${a}</span>`
+          `<span class="px-2 py-1 rounded bg-emerald-900/40 border border-emerald-700 text-emerald-300 text-xs font-mono">${escapeHtml(a)}</span>`
         ).join('');
       } else {
         i2cEl.innerHTML = '<span class="text-slate-600 text-sm">нет устройств</span>';
@@ -476,11 +514,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     // --- Действия панели управления ---
     async function rebootEsp() {
-      await fetch('/api/reboot_esp', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+      await fetch('/api/reboot_esp', { method: 'POST', headers: authHeaders(), body: '{}' });
     }
 
     async function resetAi() {
-      await fetch('/api/ai/reset', { method: 'POST' });
+      await fetch('/api/ai/reset', { method: 'POST', headers: authHeaders() });
     }
 
     async function sendDirect() {
@@ -488,7 +526,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       if (!msg) return;
       await fetch('/api/direct_command', {
         method: 'POST',
-        headers: {'Content-Type':'application/json'},
+        headers: authHeaders(),
         body: JSON.stringify({ message: msg })
       });
       document.getElementById('directCmd').value = '';
@@ -498,7 +536,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const prompt = document.getElementById('systemPrompt').value;
       await fetch('/api/settings/prompt', {
         method: 'POST',
-        headers: {'Content-Type':'application/json'},
+        headers: authHeaders(),
         body: JSON.stringify({ prompt })
       });
     }
@@ -520,8 +558,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard() -> HTMLResponse:
-    """Главная страница — веб-дашборд."""
-    return HTMLResponse(DASHBOARD_HTML)
+    """Главная страница — веб-дашборд с инжектированным API-токеном."""
+    token_json = json.dumps(get_configured_token())
+    html = DASHBOARD_HTML.replace("__API_TOKEN_JSON__", token_json)
+    return HTMLResponse(html)
 
 
 # Точка входа для `python main.py`

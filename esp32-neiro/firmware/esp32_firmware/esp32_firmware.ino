@@ -36,6 +36,12 @@
 // URL Kali-сервера по умолчанию (homeserv в локальной сети 192.168.1.x)
 #define DEFAULT_SERVER   "http://192.168.1.112:8000"
 
+// API-токен по умолчанию (должен совпадать с ESP32_API_TOKEN в .env сервера)
+#define DEFAULT_API_TOKEN "esp32-neiro-change-me"
+
+// Таймаут HTTP-запроса телеметрии (мс) — не ждём долгий ответ LLM
+#define HTTP_TIMEOUT_MS  3000
+
 // Интервал отправки телеметрии (мс): 3–5 сек с небольшим джиттером
 #define TELEMETRY_BASE_MS 4000
 #define TELEMETRY_JITTER_MS 500
@@ -46,9 +52,9 @@
 
 // ==================== Список отслеживаемых GPIO ====================
 
-// Пины, которые мы включаем в телеметрию (6–11 зарезервированы под flash)
+// Пины для телеметрии (6–11 flash; 21/22 — I2C SDA/SCL, не трогаем)
 const uint8_t TRACKED_PINS[] = {
-  2, 4, 5, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33
+  2, 4, 5, 12, 13, 14, 15, 16, 17, 18, 19, 23, 25, 26, 27, 32, 33
 };
 const size_t TRACKED_PINS_COUNT = sizeof(TRACKED_PINS) / sizeof(TRACKED_PINS[0]);
 
@@ -73,6 +79,7 @@ LiquidCrystal_I2C *lcdDisplay = nullptr;
 bool apMode = false;              // true = работаем как точка доступа
 bool wifiConnected = false;       // true = подключены к домашней сети
 String serverUrl = DEFAULT_SERVER; // URL бэкенда на Kali
+String apiToken = DEFAULT_API_TOKEN; // Токен X-API-Token
 
 // Таймеры
 unsigned long lastTelemetryMs = 0;
@@ -89,6 +96,7 @@ void loadSettings() {
   String savedSsid = prefs.getString("ssid", "");
   String savedPass = prefs.getString("pass", "");
   String savedServer = prefs.getString("server", DEFAULT_SERVER);
+  String savedToken = prefs.getString("token", DEFAULT_API_TOKEN);
   prefs.end();
 
   if (savedSsid.length() > 0) {
@@ -99,13 +107,15 @@ void loadSettings() {
     Serial.printf("[WiFi] Подключение к дефолтной сети: %s\n", DEFAULT_SSID);
   }
   serverUrl = savedServer;
+  apiToken = savedToken;
 }
 
-void saveSettings(const String &ssid, const String &pass, const String &server) {
+void saveSettings(const String &ssid, const String &pass, const String &server, const String &token) {
   prefs.begin("esp32neiro", false);
   prefs.putString("ssid", ssid);
   prefs.putString("pass", pass);
   prefs.putString("server", server);
+  prefs.putString("token", token.length() > 0 ? token : DEFAULT_API_TOKEN);
   prefs.end();
   Serial.println("[Prefs] Настройки сохранены, перезагрузка…");
   delay(500);
@@ -141,6 +151,8 @@ const char PORTAL_HTML[] PROGMEM = R"rawliteral(
     <input name="pass" type="password" placeholder="00000001">
     <label>URL сервера (Kali)</label>
     <input name="server" required placeholder="http://192.168.1.112:8000" value="http://192.168.1.112:8000">
+    <label>API-токен</label>
+    <input name="token" placeholder="esp32-neiro-change-me" value="esp32-neiro-change-me">
     <button type="submit">Сохранить и перезагрузить</button>
   </form>
 </body>
@@ -155,6 +167,7 @@ void handlePortalSave() {
   String ssid = portalServer.arg("ssid");
   String pass = portalServer.arg("pass");
   String server = portalServer.arg("server");
+  String token = portalServer.arg("token");
 
   if (ssid.length() == 0) {
     portalServer.send(400, "text/plain", "SSID обязателен");
@@ -162,7 +175,7 @@ void handlePortalSave() {
   }
   portalServer.send(200, "text/html", "<html><body><h2>Сохранено! ESP32 перезагружается…</h2></body></html>");
   delay(300);
-  saveSettings(ssid, pass, server);
+  saveSettings(ssid, pass, server, token);
 }
 
 // Перехват любого неизвестного URL — редирект на главную (Captive Portal)
@@ -385,9 +398,12 @@ void sendTelemetry() {
   serializeJson(doc, body);
 
   HTTPClient http;
-  http.setTimeout(10000);
+  http.setTimeout(HTTP_TIMEOUT_MS);
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
+  if (apiToken.length() > 0) {
+    http.addHeader("X-API-Token", apiToken);
+  }
 
   int code = http.POST(body);
   if (code > 0) {
@@ -413,6 +429,7 @@ void sendTelemetry() {
 void setup() {
   Serial.begin(115200);
   delay(500);
+  randomSeed(esp_random());
   Serial.println("\n=== ESP32 neiro — Dynamic Agent ===");
 
   // Инициализация I2C для сканирования и дисплеев
