@@ -447,8 +447,8 @@ void sendTelemetry() {
   if (!url.endsWith("/")) url += "/";
   url += "api/telemetry";
 
-  // Собираем JSON-телеметрию
-  StaticJsonDocument<4096> doc;
+  // Телеметрия — буфер в куче (StaticJsonDocument 4K на стеке вызывал stack overflow)
+  DynamicJsonDocument doc(4096);
   doc["device_id"] = WiFi.macAddress();
   doc["uptime_ms"] = millis();
   doc["firmware_version"] = FIRMWARE_VERSION;

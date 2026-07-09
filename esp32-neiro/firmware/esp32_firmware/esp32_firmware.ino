@@ -40,7 +40,7 @@
 #define DEFAULT_API_TOKEN "esp32-neiro-change-me"
 
 // Версия прошивки (отображается в дашборде)
-#define FIRMWARE_VERSION "1.2.0"
+#define FIRMWARE_VERSION "1.2.1"
 
 // Таймаут HTTP-запроса телеметрии (мс) — не ждём долгий ответ LLM
 #define HTTP_TIMEOUT_MS  3000
@@ -447,8 +447,8 @@ void sendTelemetry() {
   if (!url.endsWith("/")) url += "/";
   url += "api/telemetry";
 
-  // Собираем JSON-телеметрию
-  StaticJsonDocument<4096> doc;
+  // Телеметрия — буфер в куче (StaticJsonDocument 4K на стеке вызывал stack overflow)
+  DynamicJsonDocument doc(4096);
   doc["device_id"] = WiFi.macAddress();
   doc["uptime_ms"] = millis();
   doc["firmware_version"] = FIRMWARE_VERSION;
@@ -474,7 +474,7 @@ void sendTelemetry() {
   if (code > 0) {
     String response = http.getString();
     if (code == 200 && response.length() > 0) {
-      StaticJsonDocument<4096> respDoc;
+      DynamicJsonDocument respDoc(2048);
       DeserializationError err = deserializeJson(respDoc, response);
       if (err) {
         Serial.printf("[HTTP] JSON parse error: %s\n", err.c_str());
