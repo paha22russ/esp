@@ -369,7 +369,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <p>Очередь команд: <span id="pendingCmds" class="text-sky-400">0</span></p>
         <p>Device ID: <span id="deviceId" class="text-slate-400 font-mono">—</span></p>
         <p>LLM: <span id="llmProvider" class="text-violet-400">—</span></p>
-        <p id="fallbackBadge" class="hidden text-amber-400">⚡ Fallback: Ollama (Gemini в ожидании)</p>
       </section>
     </div>
   </main>
@@ -428,12 +427,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       document.getElementById('pendingCmds').textContent = data.pending_commands || 0;
 
       document.getElementById('llmProvider').textContent = data.active_llm_provider || '—';
-      const fb = document.getElementById('fallbackBadge');
-      if (data.gemini_fallback_active) {
-        fb.classList.remove('hidden');
-      } else {
-        fb.classList.add('hidden');
-      }
 
       // Лог активности
       const logEl = document.getElementById('activityLog');

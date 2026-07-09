@@ -55,7 +55,7 @@ if [ ! -f .env ]; then
   cp .env.example .env
   echo ""
   echo "!!! ВАЖНО: отредактируйте $SERVER_DIR/.env"
-  echo "    Впишите GOOGLE_API_KEY (Gemini) и проверьте OLLAMA_BASE_URL"
+  echo "    Проверьте OLLAMA_BASE_URL и OLLAMA_MODEL"
   echo "    nano $SERVER_DIR/.env"
   echo ""
 fi
@@ -65,7 +65,7 @@ OLLAMA_URL="${OLLAMA_BASE_URL:-http://192.168.1.112:11434}"
 if curl -sf --connect-timeout 3 "${OLLAMA_URL%/v1}/api/tags" >/dev/null 2>&1; then
   echo "[OK] Ollama доступна: $OLLAMA_URL"
 else
-  echo "[!] Ollama не отвечает на $OLLAMA_URL (fallback может не работать)"
+  echo "[!] Ollama не отвечает на $OLLAMA_URL"
 fi
 
 # --- Systemd user-сервис (автозапуск) ---

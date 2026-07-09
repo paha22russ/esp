@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")"
 
 if [ ! -f .env ]; then
-  echo "Создайте .env из .env.example и впишите GOOGLE_API_KEY"
+  echo "Создайте .env из .env.example и проверьте OLLAMA_BASE_URL"
   cp -n .env.example .env
   echo "Отредактируйте: nano .env"
   exit 1

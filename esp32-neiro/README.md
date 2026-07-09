@@ -8,7 +8,7 @@
 ESP32 (прошивка)  ──POST /api/telemetry──►  Kali Linux (FastAPI)
        ▲                                        │
        │                                        ▼
-       └── JSON commands ◄──  LLM (Gemini → Ollama fallback / OpenAI / Anthropic)
+       └── JSON commands ◄──  LLM (Ollama / OpenAI / Anthropic)
                                     ▲
                               Web Dashboard (браузер)
 ```
@@ -34,7 +34,7 @@ esp32-neiro/
 ### Требования
 
 - Python 3.10+
-- API-ключ Google Gemini **или** Ollama на homeserv в локальной сети
+- Ollama на homeserv в локальной сети (или OpenAI / Anthropic)
 
 ### Установка
 
@@ -44,11 +44,11 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# Отредактируйте .env — впишите GOOGLE_API_KEY (Gemini)
+# Отредактируйте .env — проверьте OLLAMA_BASE_URL
 nano .env
 ```
 
-**Рекомендуемый режим (`LLM_PROVIDER=auto`):** сначала Gemini, при исчерпании квоты — автоматический переход на Ollama (`http://192.168.1.112:11434`).
+По умолчанию используется **Ollama** (`http://192.168.1.112:11434`).
 
 ### Запуск
 
@@ -62,9 +62,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 | Переменная | Описание |
 |------------|----------|
-| `LLM_PROVIDER` | `auto` (Gemini→Ollama), `google`, `ollama`, `openai`, `anthropic` |
-| `GOOGLE_API_KEY` | Ключ Google Gemini |
-| `GOOGLE_MODEL` | `gemini-2.0-flash` |
+| `LLM_PROVIDER` | `ollama` (по умолчанию), `openai`, `anthropic` |
 | `OLLAMA_BASE_URL` | `http://192.168.1.112:11434/v1` |
 | `OLLAMA_API_KEY` | `ollama` (не проверяется) |
 | `OLLAMA_MODEL` | `qwen2.5-coder:7b` / `14b` / `3b` |
@@ -89,16 +87,9 @@ curl http://192.168.1.112:11434/v1/chat/completions \
   -d '{"model":"qwen2.5-coder:7b","messages":[{"role":"user","content":"Привет"}]}'
 ```
 
-### Автоматический fallback Gemini → Ollama
+---
 
-При `LLM_PROVIDER=auto`:
-
-1. Каждый запрос сначала идёт в **Gemini** (облако)
-2. При ошибке квоты / rate limit / 429 — сервер **автоматически** переключается на **Ollama** на homeserv
-3. После fallback все запросы идут в Ollama до нажатия **«Перезапустить сервер ИИ»** в дашборде
-4. В дашборде отображается активный провайдер и статус fallback
-
-### API
+## API
 
 | Метод | Путь | Описание |
 |-------|------|----------|

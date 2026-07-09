@@ -2,10 +2,8 @@
 Обёртка Function Calling для Dynamic Agent ESP32 neiro.
 
 Поддерживает:
-  - Google Gemini (облако, API-ключ)
   - Ollama на homeserv (локальная сеть, OpenAI-совместимый API)
-  - OpenAI, Anthropic
-  - Режим auto: Gemini → автоматический fallback на Ollama при исчерпании квоты
+  - OpenAI, Anthropic (опционально)
 
 Конвертирует tool_calls LLM в команды прошивки ESP32.
 """
@@ -94,21 +92,6 @@ ESP_TOOLS_OPENAI = [
         },
     },
 ]
-
-# Ключевые слова ошибок, при которых переключаемся на Ollama
-_GEMINI_FALLBACK_KEYWORDS = (
-    "rate_limit",
-    "quota",
-    "resource_exhausted",
-    "resource exhausted",
-    "insufficient_quota",
-    "billing",
-    "exceeded",
-    "too many requests",
-    "429",
-    "503",
-    "unavailable",
-)
 
 
 def _tool_call_to_esp_command(name: str, args: dict[str, Any]) -> dict[str, Any] | None:
@@ -236,29 +219,6 @@ def _anthropic_tools() -> list[dict[str, Any]]:
     return tools
 
 
-def _should_fallback_to_ollama(exc: Exception) -> bool:
-    """
-    Определить, нужно ли переключиться на локальную Ollama.
-
-    Срабатывает при исчерпании квоты Gemini, rate limit и временной недоступности.
-    """
-    msg = str(exc).lower()
-    if any(kw in msg for kw in _GEMINI_FALLBACK_KEYWORDS):
-        return True
-    # OpenAI SDK кладёт HTTP-код в status_code
-    status = getattr(exc, "status_code", None)
-    if status in (429, 503, 500):
-        return True
-    # У вложенных ошибок OpenAI
-    body = getattr(exc, "body", None)
-    if body and isinstance(body, dict):
-        err = body.get("error", {})
-        code = str(err.get("code", "")).lower()
-        if any(kw in code for kw in _GEMINI_FALLBACK_KEYWORDS):
-            return True
-    return False
-
-
 def _call_openai_compatible(
     *,
     base_url: str | None,
@@ -271,7 +231,7 @@ def _call_openai_compatible(
     """
     Универсальный вызов через OpenAI-совместимый API.
 
-    Используется для: OpenAI, Gemini (OpenAI-совместимый endpoint), Ollama.
+    Используется для: OpenAI, Ollama.
     """
     from openai import OpenAI
 
@@ -295,29 +255,6 @@ def _call_openai_compatible(
     return _parse_openai_response(response)
 
 
-def _call_gemini(system: str, user_message: str) -> tuple[str, list[dict[str, Any]]]:
-    """
-    Вызов Google Gemini через OpenAI-совместимый endpoint.
-
-    Документация: https://ai.google.dev/gemini-api/docs/openai
-    """
-    base_url = os.getenv(
-        "GOOGLE_OPENAI_BASE_URL",
-        "https://generativelanguage.googleapis.com/v1beta/openai/",
-    )
-    api_key = os.getenv("GOOGLE_API_KEY", "")
-    model = os.getenv("GOOGLE_MODEL", "gemini-2.0-flash")
-
-    return _call_openai_compatible(
-        base_url=base_url,
-        api_key=api_key,
-        model=model,
-        system=system,
-        user_message=user_message,
-        provider_label=f"Gemini ({model})",
-    )
-
-
 def _call_ollama(system: str, user_message: str) -> tuple[str, list[dict[str, Any]]]:
     """
     Вызов локальной Ollama на homeserv.
@@ -339,47 +276,9 @@ def _call_ollama(system: str, user_message: str) -> tuple[str, list[dict[str, An
     )
 
 
-def _call_with_auto_fallback(system: str, user_message: str) -> tuple[str, list[dict[str, Any]]]:
-    """
-    Режим auto: сначала Gemini, при ошибке квоты — Ollama на homeserv.
-
-    После первого fallback флаг gemini_fallback_active остаётся True
-    до нажатия «Перезапустить сервер ИИ» в дашборде.
-    """
-    # Если уже переключились на Ollama — не тратим квоту Gemini
-    if app_state.gemini_fallback_active:
-        app_state.add_log("Используется локальная Ollama (Gemini в режиме ожидания).", "info")
-        return _call_ollama(system, user_message)
-
-    try:
-        reasoning, commands = _call_gemini(system, user_message)
-        return reasoning, commands
-    except Exception as exc:
-        if not _should_fallback_to_ollama(exc):
-            raise
-
-        app_state.gemini_fallback_active = True
-        app_state.add_log(
-            f"Квота/лимит Gemini исчерпан ({exc}). Переключение на Ollama (homeserv)…",
-            "warn",
-        )
-        app_state.add_thought(
-            f"Gemini недоступен ({exc}). Автоматически переключаюсь на локальную модель "
-            f"{os.getenv('OLLAMA_MODEL', 'qwen2.5-coder:7b')} на homeserv.",
-            "system",
-        )
-        return _call_ollama(system, user_message)
-
-
 def _invoke_llm(provider: str, system: str, full_user: str) -> tuple[str, list[dict[str, Any]]]:
     """Синхронный вызов LLM по провайдеру (запускать через asyncio.to_thread)."""
-    if provider == "auto":
-        return _call_with_auto_fallback(system, full_user)
-
-    if provider == "google":
-        return _call_gemini(system, full_user)
-
-    if provider == "ollama":
+    if provider in ("ollama", "auto", "google"):
         return _call_ollama(system, full_user)
 
     if provider == "openai":
@@ -420,13 +319,11 @@ async def run_llm_agent(
     Вызвать LLM с Function Calling и вернуть команды для ESP32.
 
     Провайдер задаётся LLM_PROVIDER в .env:
-      auto    — Gemini + fallback на Ollama (рекомендуется)
-      google  — только Gemini
-      ollama  — только Ollama (локальная сеть)
-      openai  — OpenAI
+      ollama    — Ollama на homeserv (по умолчанию)
+      openai    — OpenAI
       anthropic — Anthropic Claude
     """
-    provider = os.getenv("LLM_PROVIDER", "auto").lower()
+    provider = os.getenv("LLM_PROVIDER", "ollama").lower()
     hardware_ctx = _build_hardware_context(device_id)
 
     system = app_state.system_prompt
@@ -447,20 +344,9 @@ async def run_llm_agent(
         app_state.add_log(str(exc), "error")
         return []
     except Exception as exc:
-        # Если auto уже пробовал fallback внутри — сюда попадут только фатальные ошибки
-        if provider == "auto" and not app_state.gemini_fallback_active:
-            try:
-                app_state.gemini_fallback_active = True
-                app_state.add_log(f"Gemini недоступен, пробую Ollama… ({exc})", "warn")
-                reasoning, commands = await asyncio.to_thread(_call_ollama, system, full_user)
-            except Exception as ollama_exc:
-                app_state.add_log(f"Ошибка Ollama: {ollama_exc}", "error")
-                app_state.add_thought(f"Оба провайдера недоступны. Ollama: {ollama_exc}", "error")
-                return []
-        else:
-            app_state.add_log(f"Ошибка LLM: {exc}", "error")
-            app_state.add_thought(f"Ошибка при обращении к нейросети: {exc}", "error")
-            return []
+        app_state.add_log(f"Ошибка LLM: {exc}", "error")
+        app_state.add_thought(f"Ошибка при обращении к нейросети: {exc}", "error")
+        return []
 
     # Сохраняем контекст диалога
     app_state.llm_history.append({"role": "user", "content": full_user})
