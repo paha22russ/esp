@@ -39,6 +39,31 @@ ESP_TOOLS_OPENAI = [
     {
         "type": "function",
         "function": {
+            "name": "blink_led",
+            "description": (
+                "Мигать светодиодом на GPIO с заданной частотой в течение указанного времени. "
+                "Используй для задач «помигай», «мигай N Гц M минут». "
+                "GPIO 2 — встроенный LED (active-low: включен при LOW)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pin": {"type": "integer", "description": "Номер GPIO-пина (обычно 2)", "default": 2},
+                    "hz": {"type": "number", "description": "Частота мигания в герцах", "default": 1},
+                    "duration_sec": {"type": "integer", "description": "Длительность в секундах", "default": 60},
+                    "active_low": {
+                        "type": "boolean",
+                        "description": "true для встроенного LED на GPIO 2",
+                        "default": True,
+                    },
+                },
+                "required": ["pin", "hz", "duration_sec"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "digital_write_pin",
             "description": "Подать HIGH (1) или LOW (0) на выходной GPIO-пин",
             "parameters": {
@@ -100,6 +125,18 @@ def _tool_call_to_esp_command(name: str, args: dict[str, Any]) -> dict[str, Any]
         return {"cmd": "pin_mode", "pin": args["pin"], "mode": args["mode"]}
     if name == "digital_write_pin":
         return {"cmd": "digital_write", "pin": args["pin"], "value": args["value"]}
+    if name == "blink_led":
+        pin = int(args.get("pin", 2))
+        hz = float(args.get("hz", 1))
+        duration_sec = int(args.get("duration_sec", 60))
+        active_low = args.get("active_low", pin == 2)
+        return {
+            "cmd": "blink",
+            "pin": pin,
+            "hz": hz,
+            "duration_ms": duration_sec * 1000,
+            "active_low": bool(active_low),
+        }
     if name == "init_i2c_display":
         addr = str(args["address"])
         if not addr.startswith("0x"):
@@ -239,7 +276,7 @@ def _call_openai_compatible(
     if base_url:
         kwargs["base_url"] = base_url
 
-    client = OpenAI(**kwargs)
+    client = OpenAI(**kwargs, timeout=120.0)
 
     messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
     messages.extend(app_state.llm_history[-10:])

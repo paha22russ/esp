@@ -88,6 +88,15 @@ unsigned long nextTelemetryInterval = TELEMETRY_BASE_MS;
 // Кэш режимов пинов (для корректного чтения телеметрии)
 int pinModes[40]; // индекс = номер пина; -1 = не настроен, INPUT=0, OUTPUT=1
 
+// Состояние мигания светодиодом (неблокирующее, в loop)
+bool blinkActive = false;
+uint8_t blinkPin = 2;
+unsigned long blinkHalfPeriodMs = 500;
+unsigned long blinkEndMs = 0;
+unsigned long blinkLastToggleMs = 0;
+bool blinkLedOn = false;
+bool blinkActiveLow = true;
+
 // ==================== Preferences: сохранение/загрузка ====================
 
 void loadSettings() {
@@ -320,6 +329,48 @@ void printOnDisplay(const String &text, int line) {
   }
 }
 
+// ==================== Мигание светодиодом (неблокирующее) ====================
+
+void startBlink(uint8_t pin, float hz, unsigned long durationMs, bool activeLow) {
+  if (hz <= 0.0f) hz = 1.0f;
+  if (durationMs == 0) durationMs = 60000;
+
+  blinkActive = true;
+  blinkPin = pin;
+  blinkHalfPeriodMs = (unsigned long)(500.0f / hz);
+  if (blinkHalfPeriodMs < 10) blinkHalfPeriodMs = 10;
+  blinkEndMs = millis() + durationMs;
+  blinkLastToggleMs = millis();
+  blinkLedOn = true;
+  blinkActiveLow = activeLow;
+
+  pinMode(pin, OUTPUT);
+  pinModes[pin] = 1;
+  digitalWrite(pin, activeLow ? LOW : HIGH);
+
+  Serial.printf("[Blink] GPIO %u, %.2f Гц, %lu мс, active_low=%d\n",
+                pin, hz, durationMs, activeLow);
+}
+
+void updateBlink() {
+  if (!blinkActive) return;
+
+  unsigned long now = millis();
+  if ((long)(now - blinkEndMs) >= 0) {
+    blinkActive = false;
+    digitalWrite(blinkPin, blinkActiveLow ? HIGH : LOW);
+    Serial.println("[Blink] Завершено");
+    return;
+  }
+
+  if (now - blinkLastToggleMs >= blinkHalfPeriodMs) {
+    blinkLastToggleMs = now;
+    blinkLedOn = !blinkLedOn;
+    int level = blinkLedOn ? (blinkActiveLow ? LOW : HIGH) : (blinkActiveLow ? HIGH : LOW);
+    digitalWrite(blinkPin, level);
+  }
+}
+
 // ==================== Обработчик команд от сервера ====================
 
 void executeCommands(JsonArray &commands) {
@@ -348,6 +399,13 @@ void executeCommands(JsonArray &commands) {
       if (pin >= 0) {
         digitalWrite(pin, val ? HIGH : LOW);
       }
+    }
+    else if (strcmp(type, "blink") == 0) {
+      int pin = cmd["pin"] | 2;
+      float hz = cmd["hz"] | 1.0f;
+      unsigned long durationMs = cmd["duration_ms"] | 60000;
+      bool activeLow = cmd["active_low"] | (pin == 2);
+      startBlink((uint8_t)pin, hz, durationMs, activeLow);
     }
     else if (strcmp(type, "init_display") == 0) {
       const char *addrStr = cmd["address"] | "0x3C";
@@ -468,6 +526,7 @@ void loop() {
 
   // Периодическая отправка телеметрии
   unsigned long now = millis();
+  updateBlink();
   if (now - lastTelemetryMs >= nextTelemetryInterval) {
     lastTelemetryMs = now;
     nextTelemetryInterval = TELEMETRY_BASE_MS + random(0, TELEMETRY_JITTER_MS * 2 + 1) - TELEMETRY_JITTER_MS;

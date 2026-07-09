@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from auth import get_configured_token, verify_api_token
+from direct_interpreter import try_interpret_direct_command
 from llm_agent import analyze_i2c_change, run_llm_agent
 from state import app_state
 
@@ -53,9 +54,23 @@ async def _bg_analyze_i2c(device_id: str, new_devices: set[str], removed_devices
 async def _bg_direct_command(device_id: str | None, message: str) -> None:
     """Фоновый вызов LLM для прямого приказа оператора."""
     try:
-        commands = await run_llm_agent(message, device_id=device_id, trigger="direct")
-        if device_id and commands:
+        commands = try_interpret_direct_command(message)
+        if commands:
+            blink = commands[0]
+            app_state.add_log(
+                f"Быстрый разбор: мигание GPIO {blink['pin']} "
+                f"{blink['hz']} Гц, {blink['duration_ms'] // 1000} с",
+                "success",
+            )
+        else:
+            commands = await run_llm_agent(message, device_id=device_id, trigger="direct")
+
+        if not device_id:
+            app_state.add_log("ESP32 не подключён — команды некуда отправить.", "error")
+        elif commands:
             app_state.enqueue_commands(device_id, commands)
+            names = ", ".join(c.get("cmd", "?") for c in commands)
+            app_state.add_log(f"Команды в очереди ESP32: {names}", "info")
     except Exception as exc:
         app_state.add_log(f"Ошибка фонового LLM (приказ): {exc}", "error")
     await app_state.notify_sse()

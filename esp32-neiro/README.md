@@ -162,6 +162,7 @@ curl http://192.168.1.112:11434/v1/chat/completions \
 |---------|-----------|----------|
 | `pin_mode` | pin, mode | Настройка GPIO |
 | `digital_write` | pin, value | HIGH/LOW |
+| `blink` | pin, hz, duration_ms, active_low | Мигание светодиодом |
 | `init_display` | address | OLED 0x3C / LCD 0x27 |
 | `print_text` | text, line | Текст на дисплей |
 | `reboot` | — | Перезагрузка |
