@@ -1,10 +1,10 @@
 # Копирование ESP32 neiro в Yandex.Disk (Windows)
-# Запуск в PowerShell:
+# Запуск на ПК Yarag N2 в PowerShell:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File copy-to-yandex.ps1
 
 $ErrorActionPreference = "Stop"
 
-$Dest = "C:\Users\myzhe\Yandex.Disk\Программы\Проекты Сервер\ESP neiro"
+$Dest = "C:\Users\Yarag N2\Yandex.Disk\Программы\Проекты Сервер\ESP neiro"
 $Branch = "cursor/esp32-neiro-bd71"
 $Repo = "https://github.com/paha22russ/esp.git"
 $Temp = Join-Path $env:TEMP "esp-neiro-clone"
@@ -20,14 +20,20 @@ Write-Host "Клонирование репозитория (ветка $Branch)
 git clone -b $Branch --depth 1 $Repo $Temp
 
 Write-Host "Копирование файлов..."
-Copy-Item -Recurse -Force (Join-Path $Temp "esp32-neiro\*") $Dest
+Get-ChildItem (Join-Path $Temp "esp32-neiro") | ForEach-Object {
+    Copy-Item -Recurse -Force $_.FullName (Join-Path $Dest $_.Name)
+}
 
 Remove-Item -Recurse -Force $Temp
 
 Write-Host ""
 Write-Host "Готово!" -ForegroundColor Green
-Write-Host "Прошивка:" (Join-Path $Dest "firmware\esp32_firmware\esp32_firmware.ino")
-Write-Host "Сервер:" (Join-Path $Dest "server")
 Write-Host ""
-Write-Host "API-токен по умолчанию: esp32-neiro-change-me"
-Write-Host "URL сервера: http://192.168.1.112:8000"
+Write-Host "Прошивка Arduino IDE:"
+Write-Host "  $Dest\firmware\esp32_firmware\esp32_firmware.ino"
+Write-Host ""
+Write-Host "Сервер Python:"
+Write-Host "  $Dest\server\"
+Write-Host ""
+Write-Host "Сервер на homeserv уже запущен: http://192.168.1.112:8000"
+Write-Host "API-токен: esp32-neiro-change-me"
