@@ -315,7 +315,7 @@ def _call_ollama(system: str, user_message: str) -> tuple[str, list[dict[str, An
 
 def _invoke_llm(provider: str, system: str, full_user: str) -> tuple[str, list[dict[str, Any]]]:
     """Синхронный вызов LLM по провайдеру (запускать через asyncio.to_thread)."""
-    if provider in ("ollama", "auto", "google"):
+    if provider == "ollama":
         return _call_ollama(system, full_user)
 
     if provider == "openai":

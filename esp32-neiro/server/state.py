@@ -9,9 +9,21 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
+
+# Человекочитаемые подписи статусов приказов
+ORDER_STATUS_LABELS: dict[str, str] = {
+    "received": "Получен",
+    "processing": "Обработка",
+    "queued": "В очереди на ESP32",
+    "sent": "Отправлен на ESP32",
+    "no_device": "ESP32 не подключён",
+    "no_commands": "Команды не сгенерированы",
+    "error": "Ошибка",
+}
 
 # Системный промпт по умолчанию для Dynamic Agent
 DEFAULT_SYSTEM_PROMPT = (
@@ -57,6 +69,8 @@ class AppState:
         self.llm_history: list[dict[str, str]] = []
         # Активный LLM-провайдер (отображается в дашборде)
         self.active_llm_provider: str = "—"
+        # История прямых приказов оператора
+        self.command_orders: deque[dict[str, Any]] = deque(maxlen=50)
         # Предыдущие I2C-снимки для обнаружения hot-plug
         self._prev_i2c: dict[str, set[str]] = {}
         # Подписчики SSE: asyncio.Queue для каждого клиента
@@ -82,16 +96,68 @@ class AppState:
         }
         self.ai_thoughts.appendleft(entry)
 
-    def enqueue_commands(self, device_id: str, commands: list[dict[str, Any]]) -> None:
+    def enqueue_commands(
+        self,
+        device_id: str,
+        commands: list[dict[str, Any]],
+        order_id: str | None = None,
+    ) -> None:
         """Поставить команды в очередь для конкретного ESP32."""
         if device_id not in self.command_queues:
             self.command_queues[device_id] = []
-        self.command_queues[device_id].extend(commands)
+        for cmd in commands:
+            tagged = dict(cmd)
+            if order_id:
+                tagged["_order_id"] = order_id
+            self.command_queues[device_id].append(tagged)
 
     def pop_commands(self, device_id: str) -> list[dict[str, Any]]:
         """Забрать и очистить очередь команд для устройства."""
-        commands = self.command_queues.pop(device_id, [])
+        raw = self.command_queues.pop(device_id, [])
+        sent_order_ids: list[str] = []
+        commands: list[dict[str, Any]] = []
+        for cmd in raw:
+            order_id = cmd.pop("_order_id", None)
+            if order_id:
+                sent_order_ids.append(order_id)
+            commands.append(cmd)
+        if sent_order_ids:
+            self.mark_orders_sent(sent_order_ids)
         return commands
+
+    def create_order(self, message: str, device_id: str | None = None) -> str:
+        """Создать запись приказа и вернуть её id."""
+        order_id = uuid.uuid4().hex[:8]
+        self.command_orders.appendleft(
+            {
+                "id": order_id,
+                "message": message,
+                "status": "received",
+                "status_label": ORDER_STATUS_LABELS["received"],
+                "created_at": time.time(),
+                "updated_at": time.time(),
+                "device_id": device_id,
+                "commands_summary": None,
+                "error": None,
+            }
+        )
+        return order_id
+
+    def update_order(self, order_id: str, status: str, **extra: Any) -> None:
+        """Обновить статус приказа."""
+        for order in self.command_orders:
+            if order["id"] != order_id:
+                continue
+            order["status"] = status
+            order["status_label"] = ORDER_STATUS_LABELS.get(status, status)
+            order["updated_at"] = time.time()
+            order.update(extra)
+            return
+
+    def mark_orders_sent(self, order_ids: list[str]) -> None:
+        """Пометить приказы как отправленные на ESP32."""
+        for order_id in order_ids:
+            self.update_order(order_id, status="sent")
 
     def update_device(
         self,
@@ -151,6 +217,7 @@ class AppState:
             "system_prompt": self.system_prompt,
             "pending_commands": sum(len(q) for q in self.command_queues.values()),
             "active_llm_provider": self.active_llm_provider,
+            "command_orders": list(self.command_orders),
         }
 
     async def notify_sse(self, event_type: str = "update") -> None:

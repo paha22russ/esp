@@ -51,9 +51,11 @@ async def _bg_analyze_i2c(device_id: str, new_devices: set[str], removed_devices
     await app_state.notify_sse()
 
 
-async def _bg_direct_command(device_id: str | None, message: str) -> None:
+async def _bg_direct_command(order_id: str, device_id: str | None, message: str) -> None:
     """Фоновый вызов LLM для прямого приказа оператора."""
     try:
+        app_state.update_order(order_id, "processing", device_id=device_id)
+
         commands = try_interpret_direct_command(message)
         if commands:
             blink = commands[0]
@@ -67,12 +69,17 @@ async def _bg_direct_command(device_id: str | None, message: str) -> None:
 
         if not device_id:
             app_state.add_log("ESP32 не подключён — команды некуда отправить.", "error")
-        elif commands:
-            app_state.enqueue_commands(device_id, commands)
+            app_state.update_order(order_id, "no_device", error="ESP32 offline")
+        elif not commands:
+            app_state.update_order(order_id, "no_commands")
+        else:
+            app_state.enqueue_commands(device_id, commands, order_id=order_id)
             names = ", ".join(c.get("cmd", "?") for c in commands)
             app_state.add_log(f"Команды в очереди ESP32: {names}", "info")
+            app_state.update_order(order_id, "queued", commands_summary=names, device_id=device_id)
     except Exception as exc:
         app_state.add_log(f"Ошибка фонового LLM (приказ): {exc}", "error")
+        app_state.update_order(order_id, "error", error=str(exc))
     await app_state.notify_sse()
 
 
@@ -192,12 +199,19 @@ async def api_reboot_esp(payload: RebootPayload | None = None) -> JSONResponse:
 async def api_direct_command(payload: DirectCommandPayload) -> JSONResponse:
     """Отправить прямой текстовый приказ в нейросеть (LLM в фоне)."""
     device_id = payload.device_id or app_state.get_primary_device_id()
+    order_id = app_state.create_order(payload.message, device_id=device_id)
     app_state.add_log(f"Прямой приказ оператора: «{payload.message}»", "info")
 
-    asyncio.create_task(_bg_direct_command(device_id, payload.message))
+    asyncio.create_task(_bg_direct_command(order_id, device_id, payload.message))
 
     await app_state.notify_sse()
-    return JSONResponse({"ok": True, "message": "Приказ принят, нейросеть думает в фоне…"})
+    return JSONResponse(
+        {
+            "ok": True,
+            "order_id": order_id,
+            "message": "Приказ принят, обрабатывается…",
+        }
+    )
 
 
 @app.post("/api/ai/reset", dependencies=[Depends(verify_api_token)])
@@ -278,6 +292,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .log-success { color: #4ade80; }
     .log-warn { color: #fbbf24; }
     .log-error { color: #f87171; }
+    .order-received { color: #94a3b8; }
+    .order-processing { color: #38bdf8; }
+    .order-queued { color: #fbbf24; }
+    .order-sent { color: #4ade80; }
+    .order-no_device, .order-no_commands, .order-error { color: #f87171; }
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
   </style>
@@ -361,13 +380,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
         <hr class="border-slate-800">
 
-        <label class="text-xs text-slate-400 block">Прямой приказ</label>
-        <textarea id="directCmd" rows="3" placeholder="ИИ, выруби всё и мигни три раза светодиодом"
+        <label class="text-xs text-slate-400 block">Прямой приказ <span class="text-slate-600">(Enter — отправить, Shift+Enter — новая строка)</span></label>
+        <textarea id="directCmd" rows="3" placeholder="помигай светодиодом 1 гц 5 минут"
           class="w-full bg-slate-800 border border-slate-700 rounded-lg p-3 text-sm text-slate-200 resize-none focus:outline-none focus:border-sky-600"></textarea>
         <button onclick="sendDirect()"
           class="w-full py-2.5 rounded-lg bg-sky-700 hover:bg-sky-600 text-white text-sm transition">
           Отправить приказ
         </button>
+
+        <div>
+          <h3 class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">История приказов</h3>
+          <div id="orderHistory" class="max-h-48 overflow-y-auto space-y-2 text-xs">
+            <p class="text-slate-600 italic">Приказов ещё не было…</p>
+          </div>
+        </div>
 
         <hr class="border-slate-800">
 
@@ -442,6 +468,23 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       document.getElementById('pendingCmds').textContent = data.pending_commands || 0;
 
       document.getElementById('llmProvider').textContent = data.active_llm_provider || '—';
+
+      // История приказов
+      const ordersEl = document.getElementById('orderHistory');
+      if (data.command_orders && data.command_orders.length) {
+        ordersEl.innerHTML = data.command_orders.map(o => {
+          const cls = 'order-' + escapeHtml(o.status);
+          const summary = o.commands_summary ? ` → ${escapeHtml(o.commands_summary)}` : '';
+          const err = o.error ? ` <span class="text-red-400">(${escapeHtml(o.error)})</span>` : '';
+          return `<div class="border border-slate-800 rounded-lg p-2 bg-slate-800/40">
+            <div class="flex justify-between gap-2">
+              <span class="text-slate-300 truncate" title="${escapeHtml(o.message)}">${escapeHtml(o.message)}</span>
+              <span class="${cls} whitespace-nowrap font-medium">${escapeHtml(o.status_label)}</span>
+            </div>
+            <div class="text-slate-600 mt-1">${formatTime(o.created_at)}${summary}${err}</div>
+          </div>`;
+        }).join('');
+      }
 
       // Лог активности
       const logEl = document.getElementById('activityLog');
@@ -539,6 +582,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       });
       document.getElementById('directCmd').value = '';
     }
+
+    document.getElementById('directCmd').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendDirect();
+      }
+    });
 
     async function savePrompt() {
       const prompt = document.getElementById('systemPrompt').value;

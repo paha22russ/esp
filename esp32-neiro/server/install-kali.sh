@@ -11,7 +11,7 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/paha22russ/esp.git"
-BRANCH="cursor/esp32-neiro-bd71"
+BRANCH="cursor/blink-led-command-bd71"
 INSTALL_DIR="${ESP32_NEIRO_HOME:-$HOME/esp}"
 SERVER_DIR="$INSTALL_DIR/esp32-neiro/server"
 SERVICE_NAME="esp32-neiro"
