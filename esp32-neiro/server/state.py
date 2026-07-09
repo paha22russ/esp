@@ -52,6 +52,10 @@ class AppState:
         self.system_prompt: str = DEFAULT_SYSTEM_PROMPT
         # История диалога с LLM для контекста
         self.llm_history: list[dict[str, str]] = []
+        # Активный LLM-провайдер (отображается в дашборде)
+        self.active_llm_provider: str = "—"
+        # True = Gemini недоступен (квота/лимит), используем Ollama до сброса ИИ
+        self.gemini_fallback_active: bool = False
         # Предыдущие I2C-снимки для обнаружения hot-plug
         self._prev_i2c: dict[str, set[str]] = {}
         # Подписчики SSE: asyncio.Queue для каждого клиента
@@ -127,7 +131,9 @@ class AppState:
     def reset_ai(self) -> None:
         """Сбросить контекст нейросети («Перезапустить сервер ИИ»)."""
         self.llm_history.clear()
-        self.add_log("Контекст нейросети сброшен оператором.", "warn")
+        self.gemini_fallback_active = False
+        self.active_llm_provider = "—"
+        self.add_log("Контекст нейросети сброшен. Gemini снова будет пробоваться первым.", "warn")
 
     def snapshot(self) -> dict[str, Any]:
         """Полный снимок для API / дашборда."""
@@ -144,6 +150,8 @@ class AppState:
             "ai_thoughts": list(self.ai_thoughts),
             "system_prompt": self.system_prompt,
             "pending_commands": sum(len(q) for q in self.command_queues.values()),
+            "active_llm_provider": self.active_llm_provider,
+            "gemini_fallback_active": self.gemini_fallback_active,
         }
 
     async def notify_sse(self, event_type: str = "update") -> None:

@@ -8,7 +8,7 @@
 ESP32 (прошивка)  ──POST /api/telemetry──►  Kali Linux (FastAPI)
        ▲                                        │
        │                                        ▼
-       └── JSON commands ◄──  LLM (OpenAI / Anthropic / Google)
+       └── JSON commands ◄──  LLM (Gemini → Ollama fallback / OpenAI / Anthropic)
                                     ▲
                               Web Dashboard (браузер)
 ```
@@ -34,7 +34,7 @@ esp32-neiro/
 ### Требования
 
 - Python 3.10+
-- API-ключ LLM (OpenAI, Anthropic или Google)
+- API-ключ Google Gemini **или** Ollama на homeserv в локальной сети
 
 ### Установка
 
@@ -44,9 +44,11 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# Отредактируйте .env — впишите API-ключ
+# Отредактируйте .env — впишите GOOGLE_API_KEY (Gemini)
 nano .env
 ```
+
+**Рекомендуемый режим (`LLM_PROVIDER=auto`):** сначала Gemini, при исчерпании квоты — автоматический переход на Ollama (`http://192.168.1.112:11434`).
 
 ### Запуск
 
@@ -60,11 +62,40 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 | Переменная | Описание |
 |------------|----------|
-| `LLM_PROVIDER` | `openai`, `anthropic` или `google` |
-| `OPENAI_API_KEY` | Ключ OpenAI |
-| `OPENAI_MODEL` | Модель, например `gpt-4o-mini` |
+| `LLM_PROVIDER` | `auto` (Gemini→Ollama), `google`, `ollama`, `openai`, `anthropic` |
+| `GOOGLE_API_KEY` | Ключ Google Gemini |
+| `GOOGLE_MODEL` | `gemini-2.0-flash` |
+| `OLLAMA_BASE_URL` | `http://192.168.1.112:11434/v1` |
+| `OLLAMA_API_KEY` | `ollama` (не проверяется) |
+| `OLLAMA_MODEL` | `qwen2.5-coder:7b` / `14b` / `3b` |
 | `HOST` | `0.0.0.0` |
 | `PORT` | `8000` |
+
+### Ollama на homeserv
+
+Проверка доступности с Kali или другого ПК в сети `192.168.1.x`:
+
+```bash
+curl http://192.168.1.112:11434/api/tags
+```
+
+OpenAI-совместимый чат:
+
+```bash
+curl http://192.168.1.112:11434/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ollama" \
+  -d '{"model":"qwen2.5-coder:7b","messages":[{"role":"user","content":"Привет"}]}'
+```
+
+### Автоматический fallback Gemini → Ollama
+
+При `LLM_PROVIDER=auto`:
+
+1. Каждый запрос сначала идёт в **Gemini** (облако)
+2. При ошибке квоты / rate limit / 429 — сервер **автоматически** переключается на **Ollama** на homeserv
+3. После fallback все запросы идут в Ollama до нажатия **«Перезапустить сервер ИИ»** в дашборде
+4. В дашборде отображается активный провайдер и статус fallback
 
 ### API
 

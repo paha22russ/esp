@@ -33,8 +33,8 @@
 #define AP_SSID          "ESP32_AI_Setup"
 #define AP_IP            "192.168.4.1"
 
-// URL Kali-сервера по умолчанию (можно изменить через Captive Portal)
-#define DEFAULT_SERVER   "http://192.168.1.100:8000"
+// URL Kali-сервера по умолчанию (homeserv в локальной сети 192.168.1.x)
+#define DEFAULT_SERVER   "http://192.168.1.112:8000"
 
 // Интервал отправки телеметрии (мс): 3–5 сек с небольшим джиттером
 #define TELEMETRY_BASE_MS 4000
@@ -140,7 +140,7 @@ const char PORTAL_HTML[] PROGMEM = R"rawliteral(
     <label>Пароль Wi-Fi</label>
     <input name="pass" type="password" placeholder="00000001">
     <label>URL сервера (Kali)</label>
-    <input name="server" required placeholder="http://192.168.1.100:8000" value="http://192.168.1.100:8000">
+    <input name="server" required placeholder="http://192.168.1.112:8000" value="http://192.168.1.112:8000">
     <button type="submit">Сохранить и перезагрузить</button>
   </form>
 </body>

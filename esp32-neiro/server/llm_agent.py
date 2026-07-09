@@ -1,7 +1,12 @@
 """
 Обёртка Function Calling для Dynamic Agent ESP32 neiro.
 
-Поддерживает OpenAI, Anthropic и Google Gemini.
+Поддерживает:
+  - Google Gemini (облако, API-ключ)
+  - Ollama на homeserv (локальная сеть, OpenAI-совместимый API)
+  - OpenAI, Anthropic
+  - Режим auto: Gemini → автоматический fallback на Ollama при исчерпании квоты
+
 Конвертирует tool_calls LLM в команды прошивки ESP32.
 """
 
@@ -88,19 +93,30 @@ ESP_TOOLS_OPENAI = [
     },
 ]
 
+# Ключевые слова ошибок, при которых переключаемся на Ollama
+_GEMINI_FALLBACK_KEYWORDS = (
+    "rate_limit",
+    "quota",
+    "resource_exhausted",
+    "resource exhausted",
+    "insufficient_quota",
+    "billing",
+    "exceeded",
+    "too many requests",
+    "429",
+    "503",
+    "unavailable",
+)
+
 
 def _tool_call_to_esp_command(name: str, args: dict[str, Any]) -> dict[str, Any] | None:
-    """
-    Преобразовать вызов инструмента LLM в команду для прошивки ESP32.
-
-    Формат команд совпадает с обработчиком в esp32_firmware.ino.
-    """
+    """Преобразовать вызов инструмента LLM в команду для прошивки ESP32."""
     if name == "set_pin_mode":
         return {"cmd": "pin_mode", "pin": args["pin"], "mode": args["mode"]}
     if name == "digital_write_pin":
         return {"cmd": "digital_write", "pin": args["pin"], "value": args["value"]}
     if name == "init_i2c_display":
-        addr = args["address"]
+        addr = str(args["address"])
         if not addr.startswith("0x"):
             addr = f"0x{int(addr):02X}" if addr.isdigit() else addr
         return {"cmd": "init_display", "address": addr}
@@ -137,7 +153,7 @@ def _build_hardware_context(device_id: str | None) -> str:
 
 
 def _parse_openai_response(response: Any) -> tuple[str, list[dict[str, Any]]]:
-    """Разобрать ответ OpenAI: текст рассуждений и список ESP-команд."""
+    """Разобрать ответ OpenAI-совместимого API: текст и ESP-команды."""
     message = response.choices[0].message
     reasoning = message.content or ""
     commands: list[dict[str, Any]] = []
@@ -168,25 +184,6 @@ def _parse_anthropic_response(response: Any) -> tuple[str, list[dict[str, Any]]]
     return "\n".join(reasoning_parts), commands
 
 
-def _parse_google_response(response: Any) -> tuple[str, list[dict[str, Any]]]:
-    """Разобрать ответ Google Gemini."""
-    reasoning_parts: list[str] = []
-    commands: list[dict[str, Any]] = []
-
-    for candidate in response.candidates:
-        for part in candidate.content.parts:
-            if hasattr(part, "text") and part.text:
-                reasoning_parts.append(part.text)
-            if hasattr(part, "function_call") and part.function_call:
-                fc = part.function_call
-                args = dict(fc.args) if fc.args else {}
-                cmd = _tool_call_to_esp_command(fc.name, args)
-                if cmd:
-                    commands.append(cmd)
-
-    return "\n".join(reasoning_parts), commands
-
-
 def _anthropic_tools() -> list[dict[str, Any]]:
     """Конвертировать схему tools в формат Anthropic."""
     tools = []
@@ -202,28 +199,139 @@ def _anthropic_tools() -> list[dict[str, Any]]:
     return tools
 
 
-def _google_tools() -> list[dict[str, Any]]:
-    """Конвертировать схему tools в формат Google Gemini."""
-    import google.generativeai as genai
+def _should_fallback_to_ollama(exc: Exception) -> bool:
+    """
+    Определить, нужно ли переключиться на локальную Ollama.
 
-    declarations = []
-    for t in ESP_TOOLS_OPENAI:
-        fn = t["function"]
-        declarations.append(
-            genai.protos.FunctionDeclaration(
-                name=fn["name"],
-                description=fn["description"],
-                parameters=genai.protos.Schema(
-                    type=genai.protos.Type.OBJECT,
-                    properties={
-                        k: genai.protos.Schema(type=genai.protos.Type.STRING)
-                        for k in fn["parameters"].get("properties", {})
-                    },
-                    required=fn["parameters"].get("required", []),
-                ),
-            )
+    Срабатывает при исчерпании квоты Gemini, rate limit и временной недоступности.
+    """
+    msg = str(exc).lower()
+    if any(kw in msg for kw in _GEMINI_FALLBACK_KEYWORDS):
+        return True
+    # OpenAI SDK кладёт HTTP-код в status_code
+    status = getattr(exc, "status_code", None)
+    if status in (429, 503, 500):
+        return True
+    # У вложенных ошибок OpenAI
+    body = getattr(exc, "body", None)
+    if body and isinstance(body, dict):
+        err = body.get("error", {})
+        code = str(err.get("code", "")).lower()
+        if any(kw in code for kw in _GEMINI_FALLBACK_KEYWORDS):
+            return True
+    return False
+
+
+def _call_openai_compatible(
+    *,
+    base_url: str | None,
+    api_key: str,
+    model: str,
+    system: str,
+    user_message: str,
+    provider_label: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    """
+    Универсальный вызов через OpenAI-совместимый API.
+
+    Используется для: OpenAI, Gemini (OpenAI-совместимый endpoint), Ollama.
+    """
+    from openai import OpenAI
+
+    kwargs: dict[str, Any] = {"api_key": api_key or "ollama"}
+    if base_url:
+        kwargs["base_url"] = base_url
+
+    client = OpenAI(**kwargs)
+
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+    messages.extend(app_state.llm_history[-10:])
+    messages.append({"role": "user", "content": user_message})
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        tools=ESP_TOOLS_OPENAI,
+        tool_choice="auto",
+    )
+    app_state.active_llm_provider = provider_label
+    return _parse_openai_response(response)
+
+
+def _call_gemini(system: str, user_message: str) -> tuple[str, list[dict[str, Any]]]:
+    """
+    Вызов Google Gemini через OpenAI-совместимый endpoint.
+
+    Документация: https://ai.google.dev/gemini-api/docs/openai
+    """
+    base_url = os.getenv(
+        "GOOGLE_OPENAI_BASE_URL",
+        "https://generativelanguage.googleapis.com/v1beta/openai/",
+    )
+    api_key = os.getenv("GOOGLE_API_KEY", "")
+    model = os.getenv("GOOGLE_MODEL", "gemini-2.0-flash")
+
+    return _call_openai_compatible(
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        system=system,
+        user_message=user_message,
+        provider_label=f"Gemini ({model})",
+    )
+
+
+def _call_ollama(system: str, user_message: str) -> tuple[str, list[dict[str, Any]]]:
+    """
+    Вызов локальной Ollama на homeserv.
+
+    OpenAI-совместимый API: http://192.168.1.112:11434/v1
+  API-ключ не проверяется — можно указать «ollama».
+    """
+    base_url = os.getenv("OLLAMA_BASE_URL", "http://192.168.1.112:11434/v1")
+    api_key = os.getenv("OLLAMA_API_KEY", "ollama")
+    model = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
+
+    return _call_openai_compatible(
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        system=system,
+        user_message=user_message,
+        provider_label=f"Ollama ({model})",
+    )
+
+
+def _call_with_auto_fallback(system: str, user_message: str) -> tuple[str, list[dict[str, Any]]]:
+    """
+    Режим auto: сначала Gemini, при ошибке квоты — Ollama на homeserv.
+
+    После первого fallback флаг gemini_fallback_active остаётся True
+    до нажатия «Перезапустить сервер ИИ» в дашборде.
+    """
+    # Если уже переключились на Ollama — не тратим квоту Gemini
+    if app_state.gemini_fallback_active:
+        app_state.add_log("Используется локальная Ollama (Gemini в режиме ожидания).", "info")
+        return _call_ollama(system, user_message)
+
+    try:
+        reasoning, commands = _call_gemini(system, user_message)
+        return reasoning, commands
+    except Exception as exc:
+        if not _should_fallback_to_ollama(exc):
+            raise
+
+        app_state.gemini_fallback_active = True
+        app_state.add_log(
+            f"Квота/лимит Gemini исчерпан ({exc}). Переключение на Ollama (homeserv)…",
+            "warn",
         )
-    return declarations
+        app_state.add_thought(
+            f"Gemini недоступен ({exc}). Автоматически переключаюсь на локальную модель "
+            f"{os.getenv('OLLAMA_MODEL', 'qwen2.5-coder:7b')} на homeserv.",
+            "system",
+        )
+        return _call_ollama(system, user_message)
 
 
 async def run_llm_agent(
@@ -234,12 +342,14 @@ async def run_llm_agent(
     """
     Вызвать LLM с Function Calling и вернуть команды для ESP32.
 
-    :param user_message: Сообщение пользователя или описание события
-    :param device_id: ID устройства для контекста железа
-    :param trigger: Причина вызова (telemetry, direct, i2c_change)
-    :return: Список команд для очереди ESP32
+    Провайдер задаётся LLM_PROVIDER в .env:
+      auto    — Gemini + fallback на Ollama (рекомендуется)
+      google  — только Gemini
+      ollama  — только Ollama (локальная сеть)
+      openai  — OpenAI
+      anthropic — Anthropic Claude
     """
-    provider = os.getenv("LLM_PROVIDER", "openai").lower()
+    provider = os.getenv("LLM_PROVIDER", "auto").lower()
     hardware_ctx = _build_hardware_context(device_id)
 
     system = app_state.system_prompt
@@ -249,29 +359,30 @@ async def run_llm_agent(
         f"Задача: {user_message}"
     )
 
-    app_state.add_log(f"Нейросеть думает ({trigger})…", "info")
+    app_state.add_log(f"Нейросеть думает ({trigger}, провайдер: {provider})…", "info")
 
     reasoning = ""
     commands: list[dict[str, Any]] = []
 
     try:
-        if provider == "openai":
-            from openai import OpenAI
+        if provider == "auto":
+            reasoning, commands = _call_with_auto_fallback(system, full_user)
 
-            client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-            model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        elif provider == "google":
+            reasoning, commands = _call_gemini(system, full_user)
 
-            messages = [{"role": "system", "content": system}]
-            messages.extend(app_state.llm_history[-10:])
-            messages.append({"role": "user", "content": full_user})
+        elif provider == "ollama":
+            reasoning, commands = _call_ollama(system, full_user)
 
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=ESP_TOOLS_OPENAI,
-                tool_choice="auto",
+        elif provider == "openai":
+            reasoning, commands = _call_openai_compatible(
+                base_url=None,
+                api_key=os.getenv("OPENAI_API_KEY", ""),
+                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                system=system,
+                user_message=full_user,
+                provider_label=f"OpenAI ({os.getenv('OPENAI_MODEL', 'gpt-4o-mini')})",
             )
-            reasoning, commands = _parse_openai_response(response)
 
         elif provider == "anthropic":
             from anthropic import Anthropic
@@ -286,40 +397,42 @@ async def run_llm_agent(
                 messages=[{"role": "user", "content": full_user}],
                 tools=_anthropic_tools(),
             )
+            app_state.active_llm_provider = f"Anthropic ({model})"
             reasoning, commands = _parse_anthropic_response(response)
-
-        elif provider == "google":
-            import google.generativeai as genai
-
-            genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-            model_name = os.getenv("GOOGLE_MODEL", "gemini-2.0-flash")
-
-            model = genai.GenerativeModel(
-                model_name=model_name,
-                system_instruction=system,
-                tools=_google_tools(),
-            )
-            response = model.generate_content(full_user)
-            reasoning, commands = _parse_google_response(response)
 
         else:
             app_state.add_log(f"Неизвестный LLM_PROVIDER: {provider}", "error")
             return []
 
     except Exception as exc:
-        app_state.add_log(f"Ошибка LLM: {exc}", "error")
-        app_state.add_thought(f"Ошибка при обращении к нейросети: {exc}", "error")
-        return []
+        # Если auto уже пробовал fallback внутри — сюда попадут только фатальные ошибки
+        if provider == "auto" and not app_state.gemini_fallback_active:
+            try:
+                app_state.gemini_fallback_active = True
+                app_state.add_log(f"Gemini недоступен, пробую Ollama… ({exc})", "warn")
+                reasoning, commands = _call_ollama(system, full_user)
+            except Exception as ollama_exc:
+                app_state.add_log(f"Ошибка Ollama: {ollama_exc}", "error")
+                app_state.add_thought(f"Оба провайдера недоступны. Ollama: {ollama_exc}", "error")
+                return []
+        else:
+            app_state.add_log(f"Ошибка LLM: {exc}", "error")
+            app_state.add_thought(f"Ошибка при обращении к нейросети: {exc}", "error")
+            return []
 
     # Сохраняем контекст диалога
     app_state.llm_history.append({"role": "user", "content": full_user})
     if reasoning:
         app_state.llm_history.append({"role": "assistant", "content": reasoning})
-        app_state.add_thought(reasoning, "llm")
+        source = "ollama" if "Ollama" in app_state.active_llm_provider else "llm"
+        app_state.add_thought(f"[{app_state.active_llm_provider}] {reasoning}", source)
 
     if commands:
         cmd_names = ", ".join(c.get("cmd", "?") for c in commands)
-        app_state.add_log(f"Нейросеть сгенерировала команды: {cmd_names}", "success")
+        app_state.add_log(
+            f"Нейросеть ({app_state.active_llm_provider}) сгенерировала команды: {cmd_names}",
+            "success",
+        )
     else:
         app_state.add_log("Нейросеть не предложила команд для ESP32.", "info")
 
@@ -331,11 +444,7 @@ async def analyze_i2c_change(
     new_devices: set[str],
     removed_devices: set[str],
 ) -> list[dict[str, Any]]:
-    """
-    Вызвать LLM при изменении состава I2C-шины (hot-plug).
-
-  Пример: появился 0x3C → LLM решит инициализировать OLED.
-    """
+    """Вызвать LLM при изменении состава I2C-шины (hot-plug)."""
     parts = []
     for addr in new_devices:
         parts.append(f"НОВОЕ устройство на I2C: {addr}")
