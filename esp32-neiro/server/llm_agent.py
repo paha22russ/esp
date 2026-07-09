@@ -16,6 +16,8 @@ import os
 import re
 from typing import Any
 
+from esp_commands import schedule_tool_to_commands, tool_to_esp_commands
+from scheduler import parse_time_expression, schedule_commands
 from state import app_state
 
 # --- Описание инструментов для LLM (Function Calling) ---
@@ -39,25 +41,107 @@ ESP_TOOLS_OPENAI = [
     {
         "type": "function",
         "function": {
-            "name": "blink_led",
+            "name": "generate_pin_signal",
             "description": (
-                "Мигать светодиодом на GPIO с заданной частотой в течение указанного времени. "
-                "Используй для задач «помигай», «мигай N Гц M минут». "
-                "GPIO 2 — встроенный LED (active-low: включен при LOW)."
+                "Генерировать сигнал на GPIO: square/sine/saw/triangle. "
+                "Мигание, синус, пила, треугольник. duration_sec=0 — бесконечно."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "pin": {"type": "integer", "description": "Номер GPIO-пина (обычно 2)", "default": 2},
-                    "hz": {"type": "number", "description": "Частота мигания в герцах", "default": 1},
-                    "duration_sec": {"type": "integer", "description": "Длительность в секундах", "default": 60},
-                    "active_low": {
-                        "type": "boolean",
-                        "description": "true для встроенного LED на GPIO 2",
-                        "default": True,
-                    },
+                    "pin": {"type": "integer", "default": 2},
+                    "wave": {"type": "string", "enum": ["square", "sine", "saw", "triangle"]},
+                    "hz": {"type": "number", "description": "Частота в Гц"},
+                    "duration_sec": {"type": "integer", "description": "0 = бесконечно"},
+                    "duty": {"type": "integer", "description": "0-100%"},
+                    "active_low": {"type": "boolean", "description": "true для GPIO2"},
                 },
-                "required": ["pin", "hz", "duration_sec"],
+                "required": ["pin", "wave", "hz"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_pwm_output",
+            "description": "Постоянный ШИМ на GPIO (частота + скважность)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pin": {"type": "integer"},
+                    "hz": {"type": "number", "default": 1000},
+                    "duty": {"type": "integer", "description": "0-100"},
+                    "active_low": {"type": "boolean"},
+                },
+                "required": ["pin", "duty"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "stop_pin",
+            "description": "Остановить сигнал/ШИМ на пине",
+            "parameters": {
+                "type": "object",
+                "properties": {"pin": {"type": "integer"}},
+                "required": ["pin"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_gpio_at_time",
+            "description": (
+                "Запланировать действие на абсолютное время (часы сервера). "
+                "Пример time: '13:30' или '2026-07-10 14:50'"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "time": {"type": "string", "description": "HH:MM или YYYY-MM-DD HH:MM"},
+                    "pin": {"type": "integer"},
+                    "action": {
+                        "type": "string",
+                        "enum": ["digital_write", "signal", "stop"],
+                    },
+                    "value": {"type": "integer", "description": "для digital_write 0/1"},
+                    "wave": {"type": "string"},
+                    "hz": {"type": "number"},
+                    "duration_sec": {"type": "integer"},
+                    "label": {"type": "string"},
+                },
+                "required": ["time", "pin", "action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_pin_sequence",
+            "description": "Последовательность действий с задержками delay_ms",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "delay_ms": {"type": "integer"},
+                                "cmd": {"type": "string"},
+                                "pin": {"type": "integer"},
+                                "wave": {"type": "string"},
+                                "hz": {"type": "number"},
+                                "duration_ms": {"type": "integer"},
+                                "value": {"type": "integer"},
+                                "duty": {"type": "integer"},
+                            },
+                        },
+                    }
+                },
+                "required": ["steps"],
             },
         },
     },
@@ -119,38 +203,28 @@ ESP_TOOLS_OPENAI = [
 ]
 
 
+def _apply_tool_call(name: str, args: dict[str, Any], device_id: str | None) -> list[dict[str, Any]]:
+    """Применить tool call: немедленные команды или расписание."""
+    if name == "schedule_gpio_at_time" and device_id:
+        run_at = parse_time_expression(str(args.get("time", "")))
+        if run_at:
+            cmds = schedule_tool_to_commands(args.get("action", "digital_write"), args)
+            schedule_commands(
+                device_id,
+                run_at,
+                cmds,
+                label=args.get("label", f"GPIO {args.get('pin')} в {run_at.strftime('%H:%M')}"),
+            )
+        return []
+
+    cmds = tool_to_esp_commands(name, args)
+    return cmds
+
+
 def _tool_call_to_esp_command(name: str, args: dict[str, Any]) -> dict[str, Any] | None:
-    """Преобразовать вызов инструмента LLM в команду для прошивки ESP32."""
-    if name == "set_pin_mode":
-        return {"cmd": "pin_mode", "pin": args["pin"], "mode": args["mode"]}
-    if name == "digital_write_pin":
-        return {"cmd": "digital_write", "pin": args["pin"], "value": args["value"]}
-    if name == "blink_led":
-        pin = int(args.get("pin", 2))
-        hz = float(args.get("hz", 1))
-        duration_sec = int(args.get("duration_sec", 60))
-        active_low = args.get("active_low", pin == 2)
-        return {
-            "cmd": "blink",
-            "pin": pin,
-            "hz": hz,
-            "duration_ms": duration_sec * 1000,
-            "active_low": bool(active_low),
-        }
-    if name == "init_i2c_display":
-        addr = str(args["address"])
-        if not addr.startswith("0x"):
-            addr = f"0x{int(addr):02X}" if addr.isdigit() else addr
-        return {"cmd": "init_display", "address": addr}
-    if name == "print_on_display":
-        return {
-            "cmd": "print_text",
-            "text": args.get("text", ""),
-            "line": args.get("line", 0),
-        }
-    if name == "reboot_esp32":
-        return {"cmd": "reboot"}
-    return None
+    """Преобразовать вызов инструмента LLM в одну команду (legacy)."""
+    cmds = tool_to_esp_commands(name, args)
+    return cmds[0] if cmds else None
 
 
 def _build_hardware_context(device_id: str | None) -> str:
@@ -174,7 +248,7 @@ def _build_hardware_context(device_id: str | None) -> str:
     )
 
 
-def _parse_text_tool_calls(content: str) -> list[dict[str, Any]]:
+def _parse_text_tool_calls(content: str, device_id: str | None = None) -> list[dict[str, Any]]:
     """
     Извлечь tool calls из текста ответа Ollama.
 
@@ -197,16 +271,14 @@ def _parse_text_tool_calls(content: str) -> list[dict[str, Any]]:
             idx = end
             if isinstance(obj, dict) and "name" in obj:
                 args = obj.get("arguments") or obj.get("parameters") or {}
-                cmd = _tool_call_to_esp_command(str(obj["name"]), args)
-                if cmd:
-                    commands.append(cmd)
+                commands.extend(_apply_tool_call(str(obj["name"]), args, device_id))
         except json.JSONDecodeError:
             idx = start + 1
 
     return commands
 
 
-def _parse_openai_response(response: Any) -> tuple[str, list[dict[str, Any]]]:
+def _parse_openai_response(response: Any, device_id: str | None = None) -> tuple[str, list[dict[str, Any]]]:
     """Разобрать ответ OpenAI-совместимого API: текст и ESP-команды."""
     message = response.choices[0].message
     reasoning = message.content or ""
@@ -215,17 +287,14 @@ def _parse_openai_response(response: Any) -> tuple[str, list[dict[str, Any]]]:
     if message.tool_calls:
         for tc in message.tool_calls:
             args = json.loads(tc.function.arguments)
-            cmd = _tool_call_to_esp_command(tc.function.name, args)
-            if cmd:
-                commands.append(cmd)
+            commands.extend(_apply_tool_call(tc.function.name, args, device_id))
     elif reasoning:
-        # Fallback для Ollama / qwen: команды в тексте JSON
-        commands = _parse_text_tool_calls(reasoning)
+        commands = _parse_text_tool_calls(reasoning, device_id)
 
     return reasoning, commands
 
 
-def _parse_anthropic_response(response: Any) -> tuple[str, list[dict[str, Any]]]:
+def _parse_anthropic_response(response: Any, device_id: str | None = None) -> tuple[str, list[dict[str, Any]]]:
     """Разобрать ответ Anthropic Claude."""
     reasoning_parts: list[str] = []
     commands: list[dict[str, Any]] = []
@@ -234,9 +303,7 @@ def _parse_anthropic_response(response: Any) -> tuple[str, list[dict[str, Any]]]
         if block.type == "text":
             reasoning_parts.append(block.text)
         elif block.type == "tool_use":
-            cmd = _tool_call_to_esp_command(block.name, block.input)
-            if cmd:
-                commands.append(cmd)
+            commands.extend(_apply_tool_call(block.name, block.input, device_id))
 
     return "\n".join(reasoning_parts), commands
 
@@ -264,6 +331,7 @@ def _call_openai_compatible(
     system: str,
     user_message: str,
     provider_label: str,
+    device_id: str | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """
     Универсальный вызов через OpenAI-совместимый API.
@@ -289,10 +357,10 @@ def _call_openai_compatible(
         tool_choice="auto",
     )
     app_state.active_llm_provider = provider_label
-    return _parse_openai_response(response)
+    return _parse_openai_response(response, device_id)
 
 
-def _call_ollama(system: str, user_message: str) -> tuple[str, list[dict[str, Any]]]:
+def _call_ollama(system: str, user_message: str, device_id: str | None = None) -> tuple[str, list[dict[str, Any]]]:
     """
     Вызов локальной Ollama на homeserv.
 
@@ -310,13 +378,16 @@ def _call_ollama(system: str, user_message: str) -> tuple[str, list[dict[str, An
         system=system,
         user_message=user_message,
         provider_label=f"Ollama ({model})",
+        device_id=device_id,
     )
 
 
-def _invoke_llm(provider: str, system: str, full_user: str) -> tuple[str, list[dict[str, Any]]]:
+def _invoke_llm(
+    provider: str, system: str, full_user: str, device_id: str | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
     """Синхронный вызов LLM по провайдеру (запускать через asyncio.to_thread)."""
     if provider == "ollama":
-        return _call_ollama(system, full_user)
+        return _call_ollama(system, full_user, device_id)
 
     if provider == "openai":
         return _call_openai_compatible(
@@ -326,6 +397,7 @@ def _invoke_llm(provider: str, system: str, full_user: str) -> tuple[str, list[d
             system=system,
             user_message=full_user,
             provider_label=f"OpenAI ({os.getenv('OPENAI_MODEL', 'gpt-4o-mini')})",
+            device_id=device_id,
         )
 
     if provider == "anthropic":
@@ -342,7 +414,7 @@ def _invoke_llm(provider: str, system: str, full_user: str) -> tuple[str, list[d
             tools=_anthropic_tools(),
         )
         app_state.active_llm_provider = f"Anthropic ({model})"
-        return _parse_anthropic_response(response)
+        return _parse_anthropic_response(response, device_id)
 
     raise ValueError(f"Неизвестный LLM_PROVIDER: {provider}")
 
@@ -376,7 +448,7 @@ async def run_llm_agent(
     commands: list[dict[str, Any]] = []
 
     try:
-        reasoning, commands = await asyncio.to_thread(_invoke_llm, provider, system, full_user)
+        reasoning, commands = await asyncio.to_thread(_invoke_llm, provider, system, full_user, device_id)
     except ValueError as exc:
         app_state.add_log(str(exc), "error")
         return []

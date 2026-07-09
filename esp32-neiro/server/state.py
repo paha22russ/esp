@@ -14,25 +14,21 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
+from esp_knowledge import DEFAULT_SYSTEM_PROMPT
+
 # Человекочитаемые подписи статусов приказов
 ORDER_STATUS_LABELS: dict[str, str] = {
     "received": "Получен",
     "processing": "Обработка",
     "queued": "В очереди на ESP32",
+    "scheduled": "Запланировано",
     "sent": "Отправлен на ESP32",
     "no_device": "ESP32 не подключён",
     "no_commands": "Команды не сгенерированы",
     "error": "Ошибка",
 }
 
-# Системный промпт по умолчанию для Dynamic Agent
-DEFAULT_SYSTEM_PROMPT = (
-    "Ты — безумный ИИ-инженер, который исследует подключенное к ESP32 железо на лету. "
-    "Экспериментируй смело. Анализируй I2C-устройства, GPIO и предлагай действия через доступные инструменты. "
-    "Для мигания светодиодом используй blink_led (не digital_write). "
-    "GPIO 2 — встроенный LED (active-low: LOW=включен, HIGH=выключен). "
-    "НИКОГДА не используй GPIO 6–11 (flash) и 21–22 (I2C шина). Не перезагружай ESP32 без веской причины."
-)
+# DEFAULT_SYSTEM_PROMPT импортируется из esp_knowledge.py (база знаний ESP32 v2.0)
 
 
 @dataclass
@@ -72,6 +68,8 @@ class AppState:
         self.active_llm_provider: str = "—"
         # История прямых приказов оператора
         self.command_orders: deque[dict[str, Any]] = deque(maxlen=50)
+        # Отложенные задачи (расписание GPIO)
+        self.scheduled_jobs: deque[dict[str, Any]] = deque(maxlen=100)
         # Предыдущие I2C-снимки для обнаружения hot-plug
         self._prev_i2c: dict[str, set[str]] = {}
         # Подписчики SSE: asyncio.Queue для каждого клиента
@@ -223,6 +221,7 @@ class AppState:
             "pending_commands": sum(len(q) for q in self.command_queues.values()),
             "active_llm_provider": self.active_llm_provider,
             "command_orders": list(self.command_orders),
+            "scheduled_jobs": list(self.scheduled_jobs),
         }
 
     async def notify_sse(self, event_type: str = "update") -> None:

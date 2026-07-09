@@ -19,6 +19,7 @@
 #include <Wire.h>
 #include <U8g2lib.h>
 #include <LiquidCrystal_I2C.h>
+#include "pin_engine.h"
 
 // ==================== Константы Wi-Fi ====================
 
@@ -40,7 +41,7 @@
 #define DEFAULT_API_TOKEN "esp32-neiro-change-me"
 
 // Версия прошивки (отображается в дашборде)
-#define FIRMWARE_VERSION "1.2.1"
+#define FIRMWARE_VERSION "2.0.0"
 
 // Таймаут HTTP-запроса телеметрии (мс) — не ждём долгий ответ LLM
 #define HTTP_TIMEOUT_MS  3000
@@ -90,15 +91,6 @@ unsigned long nextTelemetryInterval = TELEMETRY_BASE_MS;
 
 // Кэш режимов пинов (для корректного чтения телеметрии)
 int pinModes[40]; // индекс = номер пина; -1 = не настроен, INPUT=0, OUTPUT=1
-
-// Состояние мигания светодиодом (неблокирующее, в loop)
-bool blinkActive = false;
-uint8_t blinkPin = 2;
-unsigned long blinkHalfPeriodMs = 500;
-unsigned long blinkEndMs = 0;
-unsigned long blinkLastToggleMs = 0;
-bool blinkLedOn = false;
-bool blinkActiveLow = true;
 
 // ==================== Preferences: сохранение/загрузка ====================
 
@@ -332,48 +324,6 @@ void printOnDisplay(const String &text, int line) {
   }
 }
 
-// ==================== Мигание светодиодом (неблокирующее) ====================
-
-void startBlink(uint8_t pin, float hz, unsigned long durationMs, bool activeLow) {
-  if (hz <= 0.0f) hz = 1.0f;
-  if (durationMs == 0) durationMs = 60000;
-
-  blinkActive = true;
-  blinkPin = pin;
-  blinkHalfPeriodMs = (unsigned long)(500.0f / hz);
-  if (blinkHalfPeriodMs < 10) blinkHalfPeriodMs = 10;
-  blinkEndMs = millis() + durationMs;
-  blinkLastToggleMs = millis();
-  blinkLedOn = true;
-  blinkActiveLow = activeLow;
-
-  pinMode(pin, OUTPUT);
-  pinModes[pin] = 1;
-  digitalWrite(pin, activeLow ? LOW : HIGH);
-
-  Serial.printf("[Blink] GPIO %u, %.2f Гц, %lu мс, active_low=%d\n",
-                pin, hz, durationMs, activeLow);
-}
-
-void updateBlink() {
-  if (!blinkActive) return;
-
-  unsigned long now = millis();
-  if ((long)(now - blinkEndMs) >= 0) {
-    blinkActive = false;
-    digitalWrite(blinkPin, blinkActiveLow ? HIGH : LOW);
-    Serial.println("[Blink] Завершено");
-    return;
-  }
-
-  if (now - blinkLastToggleMs >= blinkHalfPeriodMs) {
-    blinkLastToggleMs = now;
-    blinkLedOn = !blinkLedOn;
-    int level = blinkLedOn ? (blinkActiveLow ? LOW : HIGH) : (blinkActiveLow ? HIGH : LOW);
-    digitalWrite(blinkPin, level);
-  }
-}
-
 // ==================== Обработчик команд от сервера ====================
 
 void executeCommands(JsonArray &commands) {
@@ -382,6 +332,8 @@ void executeCommands(JsonArray &commands) {
     if (!type) continue;
 
     Serial.printf("[CMD] %s\n", type);
+
+    if (pinEngineHandleCommand(cmd)) continue;
 
     if (strcmp(type, "pin_mode") == 0) {
       int pin = cmd["pin"] | -1;
@@ -400,15 +352,9 @@ void executeCommands(JsonArray &commands) {
       int pin = cmd["pin"] | -1;
       int val = cmd["value"] | 0;
       if (pin >= 0) {
+        pinEngineStopPin(pin);
         digitalWrite(pin, val ? HIGH : LOW);
       }
-    }
-    else if (strcmp(type, "blink") == 0) {
-      int pin = cmd["pin"] | 2;
-      float hz = cmd["hz"].isNull() ? 1.0f : cmd["hz"].as<float>();
-      unsigned long durationMs = cmd["duration_ms"] | 60000UL;
-      bool activeLow = cmd["active_low"].isNull() ? (pin == 2) : cmd["active_low"].as<bool>();
-      startBlink((uint8_t)pin, hz, durationMs, activeLow);
     }
     else if (strcmp(type, "init_display") == 0) {
       const char *addrStr = cmd["address"] | "0x3C";
@@ -502,6 +448,7 @@ void setup() {
   // Инициализация I2C для сканирования и дисплеев
   Wire.begin(I2C_SDA, I2C_SCL);
   initPinModesCache();
+  pinEngineInit();
 
   // Загрузка настроек и попытка Wi-Fi
   loadSettings();
@@ -535,7 +482,7 @@ void loop() {
 
   // Периодическая отправка телеметрии
   unsigned long now = millis();
-  updateBlink();
+  pinEngineUpdate();
   if (now - lastTelemetryMs >= nextTelemetryInterval) {
     lastTelemetryMs = now;
     nextTelemetryInterval = TELEMETRY_BASE_MS + random(0, TELEMETRY_JITTER_MS * 2 + 1) - TELEMETRY_JITTER_MS;

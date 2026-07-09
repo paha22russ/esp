@@ -28,6 +28,7 @@ from sse_starlette.sse import EventSourceResponse
 from auth import get_configured_token, verify_api_token
 from direct_interpreter import try_interpret_direct_command
 from llm_agent import analyze_i2c_change, run_llm_agent
+from scheduler import schedule_commands, scheduler_loop
 from state import app_state
 
 # Загружаем переменные окружения из .env
@@ -52,31 +53,61 @@ async def _bg_analyze_i2c(device_id: str, new_devices: set[str], removed_devices
 
 
 async def _bg_direct_command(order_id: str, device_id: str | None, message: str) -> None:
-    """Фоновый вызов LLM для прямого приказа оператора."""
+    """Фоновый разбор прямого приказа: быстрый интерпретатор или LLM."""
     try:
         app_state.update_order(order_id, "processing", device_id=device_id)
 
-        commands = try_interpret_direct_command(message)
-        if commands:
-            blink = commands[0]
-            app_state.add_log(
-                f"Быстрый разбор: мигание GPIO {blink['pin']} "
-                f"{blink['hz']} Гц, {blink['duration_ms'] // 1000} с",
-                "success",
-            )
+        interpreted = try_interpret_direct_command(message)
+        commands: list[dict[str, Any]] = []
+        schedules: list[dict[str, Any]] = []
+
+        if interpreted:
+            commands = interpreted.commands
+            schedules = interpreted.schedules
+            if interpreted.log:
+                app_state.add_log(f"Быстрый разбор: {interpreted.log}", "success")
         else:
             commands = await run_llm_agent(message, device_id=device_id, trigger="direct")
 
         if not device_id:
             app_state.add_log("ESP32 не подключён — команды некуда отправить.", "error")
             app_state.update_order(order_id, "no_device", error="ESP32 offline")
-        elif not commands:
-            app_state.update_order(order_id, "no_commands")
         else:
-            app_state.enqueue_commands(device_id, commands, order_id=order_id)
-            names = ", ".join(c.get("cmd", "?") for c in commands)
-            app_state.add_log(f"Команды в очереди ESP32: {names}", "info")
-            app_state.update_order(order_id, "queued", commands_summary=names, device_id=device_id)
+            for sched in schedules:
+                schedule_commands(
+                    device_id,
+                    sched["run_at"],
+                    sched["commands"],
+                    label=sched.get("label", ""),
+                    order_id=order_id,
+                )
+
+            if schedules and not commands:
+                labels = ", ".join(s.get("label", "?") for s in schedules)
+                app_state.update_order(
+                    order_id, "scheduled", commands_summary=labels, device_id=device_id,
+                )
+            elif not commands and not schedules:
+                app_state.update_order(order_id, "no_commands")
+            else:
+                if commands:
+                    app_state.enqueue_commands(device_id, commands, order_id=order_id)
+                    names = ", ".join(c.get("cmd", "?") for c in commands)
+                    app_state.add_log(f"Команды в очереди ESP32: {names}", "info")
+                status = "scheduled" if schedules else "queued"
+                summary_parts = []
+                if commands:
+                    summary_parts.append(", ".join(c.get("cmd", "?") for c in commands))
+                if schedules:
+                    summary_parts.append(
+                        "расписание: " + ", ".join(s.get("label", "?") for s in schedules)
+                    )
+                app_state.update_order(
+                    order_id,
+                    status,
+                    commands_summary="; ".join(summary_parts),
+                    device_id=device_id,
+                )
     except Exception as exc:
         app_state.add_log(f"Ошибка фонового LLM (приказ): {exc}", "error")
         app_state.update_order(order_id, "error", error=str(exc))
@@ -135,9 +166,11 @@ async def device_watchdog() -> None:
 async def lifespan(app: FastAPI):
     """Старт/остановка фоновых задач."""
     task = asyncio.create_task(device_watchdog())
+    sched = asyncio.create_task(scheduler_loop())
     app_state.add_log("Сервер ESP32 neiro запущен. Ожидаю телеметрию…", "success")
     yield
     task.cancel()
+    sched.cancel()
 
 
 app = FastAPI(
@@ -297,6 +330,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .order-received { color: #94a3b8; }
     .order-processing { color: #38bdf8; }
     .order-queued { color: #fbbf24; }
+    .order-scheduled { color: #a78bfa; }
     .order-sent { color: #4ade80; }
     .order-no_device, .order-no_commands, .order-error { color: #f87171; }
     ::-webkit-scrollbar { width: 6px; }
@@ -397,6 +431,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </div>
         </div>
 
+        <div>
+          <h3 class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Расписание</h3>
+          <div id="scheduleList" class="max-h-36 overflow-y-auto space-y-2 text-xs">
+            <p class="text-slate-600 italic">Запланированных задач нет…</p>
+          </div>
+        </div>
+
         <hr class="border-slate-800">
 
         <label class="text-xs text-slate-400 block">Системный промпт ИИ</label>
@@ -467,7 +508,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
 
       document.getElementById('deviceId').textContent = data.device_id || '—';
-      document.getElementById('fwVersion').textContent = data.firmware_version || 'старая (нет blink)';
+      document.getElementById('fwVersion').textContent = data.firmware_version || '—';
       document.getElementById('uptime').textContent = formatUptime(data.uptime_ms);
       document.getElementById('pendingCmds').textContent = data.pending_commands || 0;
 
@@ -488,6 +529,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <div class="text-slate-600 mt-1">${formatTime(o.created_at)}${summary}${err}</div>
           </div>`;
         }).join('');
+      }
+
+      // Расписание
+      const schedEl = document.getElementById('scheduleList');
+      if (data.scheduled_jobs && data.scheduled_jobs.length) {
+        schedEl.innerHTML = data.scheduled_jobs.map(j => {
+          const done = j.status === 'done';
+          const cls = done ? 'text-emerald-400' : (j.status === 'pending' ? 'text-violet-300' : 'text-red-400');
+          return `<div class="border border-slate-800 rounded-lg p-2 bg-slate-800/40">
+            <div class="flex justify-between gap-2">
+              <span class="text-slate-300 truncate">${escapeHtml(j.label || j.run_at_label)}</span>
+              <span class="${cls} whitespace-nowrap">${escapeHtml(j.status_label)}</span>
+            </div>
+            <div class="text-slate-600 mt-1">${escapeHtml(j.run_at_label)}</div>
+          </div>`;
+        }).join('');
+      } else {
+        schedEl.innerHTML = '<p class="text-slate-600 italic">Запланированных задач нет…</p>';
       }
 
       // Лог активности
