@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 
 from state import app_state
@@ -152,6 +153,38 @@ def _build_hardware_context(device_id: str | None) -> str:
     )
 
 
+def _parse_text_tool_calls(content: str) -> list[dict[str, Any]]:
+    """
+    Извлечь tool calls из текста ответа Ollama.
+
+    qwen2.5-coder часто возвращает JSON в content вместо поля tool_calls:
+      {"name": "digital_write_pin", "arguments": {"pin": 2, "value": 1}}
+    """
+    commands: list[dict[str, Any]] = []
+    if not content:
+        return commands
+
+    text = re.sub(r"```(?:json)?", "", content).replace("```", "").strip()
+    decoder = json.JSONDecoder()
+    idx = 0
+    while idx < len(text):
+        start = text.find("{", idx)
+        if start == -1:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, start)
+            idx = end
+            if isinstance(obj, dict) and "name" in obj:
+                args = obj.get("arguments") or obj.get("parameters") or {}
+                cmd = _tool_call_to_esp_command(str(obj["name"]), args)
+                if cmd:
+                    commands.append(cmd)
+        except json.JSONDecodeError:
+            idx = start + 1
+
+    return commands
+
+
 def _parse_openai_response(response: Any) -> tuple[str, list[dict[str, Any]]]:
     """Разобрать ответ OpenAI-совместимого API: текст и ESP-команды."""
     message = response.choices[0].message
@@ -164,6 +197,9 @@ def _parse_openai_response(response: Any) -> tuple[str, list[dict[str, Any]]]:
             cmd = _tool_call_to_esp_command(tc.function.name, args)
             if cmd:
                 commands.append(cmd)
+    elif reasoning:
+        # Fallback для Ollama / qwen: команды в тексте JSON
+        commands = _parse_text_tool_calls(reasoning)
 
     return reasoning, commands
 
