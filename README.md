@@ -2,6 +2,20 @@
 
 Проект управления котлом на ESP32 с веб-интерфейсом, MQTT, OTA-обновлением через GitHub и доступом через VPS-туннель.
 
+## Ветки прошивки
+
+| Env | Версия | Исходники | UI |
+|-----|--------|-----------|-----|
+| `esp32dev` | **4.2.x** (production) | `src/main.cpp` | `data/` |
+| `esp32dev_v45` | **4.5.0-beta** (отдельно) | `src_v45/` | `data_v45/` |
+
+Документация beta: `docs/architecture-4.5-beta.md`, `docs/vps-setup-4.5-beta.md`, `docs/clarifications-4.5-beta.md`.
+
+```bash
+pio run -e esp32dev_v45
+pio run -e esp32dev_v45 -t buildfs
+```
+
 ## Что важно помнить
 
 - Удаленный доступ "из любой сети" работает через VPS, но туннель поднимает **ПК в той же локальной сети, что и ESP**.
@@ -10,8 +24,9 @@
 
 ## Версия и OTA
 
-- Версия прошивки хранится в `src/main.cpp` (`FIRMWARE_VERSION`) и в `version.txt`.
-- OTA берет обновления из этого репозитория:
+- Production: `src/main.cpp` (`FIRMWARE_VERSION`) и `version.txt`.
+- Beta 4.5: `src_v45/config/version.h` и `version_v45.txt` (OTA-пути для beta ещё не подключены к main OTA — см. уточнения).
+- OTA production берёт:
   - `version.txt`
   - `firmware.bin`
   - `spiffs.bin`

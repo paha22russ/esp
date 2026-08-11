@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>Котел 4.5-beta</title>
+  <style>
+    :root {
+      --bg: #121212;
+      --panel: #1e1e1e;
+      --text: #f2f2f2;
+      --muted: #9a9a9a;
+      --accent: #ff6b35;
+      --ok: #2ecc71;
+      --warn: #f39c12;
+      --bad: #e74c3c;
+      --line: #333;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: "Segoe UI", Tahoma, sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, #2a1810 0%, var(--bg) 55%);
+      color: var(--text); min-height: 100vh; padding: 12px;
+    }
+    .badge {
+      display: inline-block; background: var(--accent); color: #111;
+      font-weight: 800; font-size: 12px; padding: 4px 10px; border-radius: 999px;
+      letter-spacing: .04em;
+    }
+    h1 { margin: 10px 0 4px; font-weight: 600; font-size: 26px; color: var(--accent); }
+    .sub { color: var(--muted); margin-bottom: 14px; font-size: 14px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .card {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px;
+    }
+    .card.wide { grid-column: 1 / -1; }
+    .label { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+    .value { font-size: 28px; color: var(--accent); font-weight: 600; }
+    .value small { font-size: 14px; color: var(--muted); }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    button, select {
+      background: #2a2a2a; color: var(--text); border: 1px solid #444;
+      border-radius: 8px; padding: 10px 12px; font-size: 14px; cursor: pointer;
+    }
+    button.primary { background: var(--accent); color: #111; border-color: transparent; font-weight: 700; }
+    button:disabled { opacity: .5; }
+    .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+    textarea {
+      width: 100%; min-height: 70px; background: #181818; color: var(--text);
+      border: 1px solid #444; border-radius: 8px; padding: 8px; font-size: 14px;
+    }
+    pre {
+      white-space: pre-wrap; font-size: 12px; color: #ccc; max-height: 220px; overflow: auto;
+      background: #161616; border-radius: 8px; padding: 8px; border: 1px solid #333;
+    }
+    .pins code { display: block; font-size: 12px; color: #ddd; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <span class="badge">4.5.0-beta</span>
+  <h1>🔥 Котел</h1>
+  <div class="sub">Отдельная beta-архитектура · PT1000 + DS18B20 · fan_power 0–100%</div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="label">Подача (PT1000)</div>
+      <div class="value"><span id="supply">--</span><small> °C</small></div>
+    </div>
+    <div class="card">
+      <div class="label">Дымоход (PT1000)</div>
+      <div class="value"><span id="flue">--</span><small> °C</small></div>
+    </div>
+    <div class="card">
+      <div class="label">Обратка</div>
+      <div class="value"><span id="ret">--</span><small> °C</small></div>
+    </div>
+    <div class="card">
+      <div class="label">Котельная / Улица</div>
+      <div class="value" style="font-size:22px">
+        <span id="boiler">--</span> / <span id="outdoor">--</span><small> °C</small>
+      </div>
+    </div>
+
+    <div class="card wide">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <div class="label">Режим</div>
+          <div id="mode" style="font-size:20px;font-weight:700">--</div>
+          <div class="label" id="state">--</div>
+        </div>
+        <div>
+          <div class="label">Вентилятор</div>
+          <div class="value" style="font-size:22px"><span id="fanPct">0</span><small> %</small></div>
+          <div class="label">Реле: <span id="fanRelay">--</span> · Насос: <span id="pump">--</span></div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <select id="modeSelect">
+          <option value="auto">Авто</option>
+          <option value="comfort">Комфорт</option>
+          <option value="neuro">Нейро (observe)</option>
+        </select>
+        <button class="primary" onclick="setMode()">Применить режим</button>
+        <button id="sysBtn" onclick="toggleSystem()">Система: --</button>
+      </div>
+      <div id="safety" class="bad" style="margin-top:8px;display:none"></div>
+    </div>
+
+    <div class="card wide">
+      <div class="label">Событие пользователя (текст / от Telegram-бота)</div>
+      <textarea id="eventText" placeholder='Например: «Подкинул два ведра угля»'></textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="primary" onclick="sendEvent()">Отправить событие</button>
+        <button onclick="loadJournal()">Обновить журнал</button>
+        <button onclick="loadHyp()">Гипотезы</button>
+      </div>
+    </div>
+
+    <div class="card wide">
+      <div class="label">Журнал</div>
+      <pre id="journal">—</pre>
+    </div>
+    <div class="card wide">
+      <div class="label">Гипотезы (Neuro этап 1)</div>
+      <pre id="hyp">—</pre>
+    </div>
+    <div class="card wide pins">
+      <div class="label">Распиновка 4.5-beta</div>
+      <code id="pins">загрузка…</code>
+    </div>
+  </div>
+
+  <script>
+    let systemEnabled = true;
+    const fmt = (v) => (v === null || v === undefined) ? '--' : Number(v).toFixed(1);
+
+    async function refresh() {
+      const r = await fetch('/api/status');
+      const d = await r.json();
+      document.getElementById('supply').textContent = fmt(d.supplyTemp);
+      document.getElementById('flue').textContent = fmt(d.flueTemp);
+      document.getElementById('ret').textContent = fmt(d.returnTemp);
+      document.getElementById('boiler').textContent = fmt(d.boilerTemp);
+      document.getElementById('outdoor').textContent = fmt(d.outdoorTemp);
+      document.getElementById('mode').textContent = d.modeRu || d.mode;
+      document.getElementById('state').textContent = d.state || '';
+      document.getElementById('fanPct').textContent = d.fanPowerPct ?? 0;
+      document.getElementById('fanRelay').textContent = d.fan ? 'ON' : 'OFF';
+      document.getElementById('pump').textContent = d.pump ? 'ON' : 'OFF';
+      systemEnabled = !!d.systemEnabled;
+      document.getElementById('sysBtn').textContent = 'Система: ' + (systemEnabled ? 'ВКЛ' : 'ВЫКЛ');
+      const s = document.getElementById('safety');
+      if (d.safetyTrip) { s.style.display = 'block'; s.textContent = 'SAFETY: ' + (d.safetyReason || ''); }
+      else s.style.display = 'none';
+      if (d.mode) document.getElementById('modeSelect').value = d.mode;
+      document.querySelector('.badge').textContent = d.version || '4.5.0-beta';
+    }
+
+    async function setMode() {
+      const mode = document.getElementById('modeSelect').value;
+      await fetch('/api/system/mode', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ mode })
+      });
+      refresh();
+    }
+
+    async function toggleSystem() {
+      await fetch('/api/system/enable?enabled=' + (systemEnabled ? 0 : 1), { method: 'POST' });
+      refresh();
+    }
+
+    async function sendEvent() {
+      const text = document.getElementById('eventText').value.trim();
+      if (!text) return;
+      await fetch('/api/events/user', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ text })
+      });
+      document.getElementById('eventText').value = '';
+      loadJournal();
+    }
+
+    async function loadJournal() {
+      const d = await (await fetch('/api/journal')).json();
+      document.getElementById('journal').textContent =
+        (d.entries || []).map(e => `${e.ms}  ${e.code}  ${e.detail || ''}`).join('\n') || 'пусто';
+    }
+
+    async function loadHyp() {
+      const d = await (await fetch('/api/hypotheses')).json();
+      document.getElementById('hyp').textContent =
+        (d.items || []).map(h => `[${Math.round(h.confidence*100)}%] ${h.id}\n${h.text}\nbasis: ${h.basis}`).join('\n\n') || 'пока нет';
+    }
+
+    async function loadPins() {
+      const d = await (await fetch('/api/pins')).json();
+      document.getElementById('pins').textContent =
+`GPIO16 fan relay
+GPIO17 pump relay
+GPIO25 DS18B20 power cut relay (NOT GPIO power)
+GPIO4  1-Wire #1 return
+GPIO5  1-Wire #2 boiler_room + outdoor
+GPIO21/22 OLED SDA/SCL 0x3C
+GPIO18/19/23 encoder
+MAX31865 flue CS26 (2w), supply CS27 (3w)
+SPI SCK32 MOSI33 MISO34
+note: ${d.note || ''}`;
+    }
+
+    refresh(); loadJournal(); loadHyp(); loadPins();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>
