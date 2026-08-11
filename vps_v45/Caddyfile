@@ -1,0 +1,24 @@
+:80 {
+  encode gzip
+
+  handle /api/* {
+    reverse_proxy ingest:8080
+  }
+
+  handle {
+    root * /srv
+    try_files {path} /index.html
+    file_server
+  }
+}
+
+# После появления домена раскомментировать и выключить блок :80 выше:
+# boiler.example.com {
+#   encode gzip
+#   handle /api/* { reverse_proxy ingest:8080 }
+#   handle {
+#     root * /srv
+#     try_files {path} /index.html
+#     file_server
+#   }
+# }
