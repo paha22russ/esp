@@ -70,9 +70,14 @@ ControlOutput ComfortModeController::tick(const PlantState& plant, uint32_t nowM
   }
 
   const float supply = plant.supply.celsius;
-  const float room = (plant.boilerRoom.quality == SensorQuality::Ok) ? plant.boilerRoom.celsius
-                    : (plant.home.quality == SensorQuality::Ok) ? plant.home.celsius
-                    : NAN;
+  // Comfort целится ТОЛЬКО в температуру дома (MQTT). Котельная — вспомогательный сенсор.
+  if (plant.home.quality != SensorQuality::Ok) {
+    out.fanPowerPct = 0;
+    out.pumpOn = plant.systemEnabled;
+    strncpy(out.stateName, "comfort_home_offline", sizeof(out.stateName) - 1);
+    return out;  // orchestrator переключит на Auto
+  }
+  const float room = plant.home.celsius;
   const float rate = plant.supplyRateCPerMin;
   const float bMin = plant.comfortBoilerMinC;
   const float bMax = plant.comfortBoilerMaxC;
@@ -84,14 +89,6 @@ ControlOutput ComfortModeController::tick(const PlantState& plant, uint32_t nowM
     out.fanPowerPct = 0;
     out.requestAfterheat = true;
     strncpy(out.stateName, "comfort_inertia_cut", sizeof(out.stateName) - 1);
-    return out;
-  }
-
-  if (isnan(room)) {
-    // нет комнатного — деградируем к коридору подачи
-    if (supply < bMin) out.fanPowerPct = 100;
-    else out.fanPowerPct = 0;
-    strncpy(out.stateName, "comfort_fallback_supply", sizeof(out.stateName) - 1);
     return out;
   }
 

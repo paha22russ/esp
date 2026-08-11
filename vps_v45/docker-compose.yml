@@ -1,0 +1,44 @@
+# VPS Germany 4.5-beta — публичный веб + ingest
+#
+# Хост: 151.247.208.17
+# Цель: страница с данными и управлением открывается из любой сети.
+#
+# ESP шлёт телеметрию на http://151.247.208.17/api/v1/ingest
+# Браузер открывает http://151.247.208.17/ (или https после TLS)
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: boiler
+      POSTGRES_USER: boiler
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_now}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    restart: unless-stopped
+
+  ingest:
+    build: ./ingest
+    environment:
+      DATABASE_URL: postgres://boiler:${POSTGRES_PASSWORD:-change_me_now}@db:5432/boiler
+      INGEST_TOKEN: ${INGEST_TOKEN:-dev-token-change-me}
+      CORS_ORIGIN: "*"
+    depends_on: [db]
+    restart: unless-stopped
+
+  web:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./web:/srv:ro
+      - caddy_data:/data
+    depends_on: [ingest]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  caddy_data:

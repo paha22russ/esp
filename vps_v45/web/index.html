@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Котел 4.5-beta · VPS</title>
+  <style>
+    :root { --bg:#101010; --card:#1c1c1c; --text:#f3f3f3; --muted:#999; --accent:#ff6b35; --ok:#2ecc71; --bad:#e74c3c; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:Segoe UI,Tahoma,sans-serif; background:radial-gradient(900px 500px at 0% 0%,#2a160e,var(--bg)); color:var(--text); padding:16px; }
+    .badge { display:inline-block; background:var(--accent); color:#111; font-weight:800; padding:4px 10px; border-radius:999px; font-size:12px; }
+    h1 { color:var(--accent); margin:10px 0 4px; font-weight:600; }
+    .sub { color:var(--muted); margin-bottom:14px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:8px; }
+    .card { background:var(--card); border:1px solid #333; border-radius:12px; padding:12px; }
+    .label { color:var(--muted); font-size:12px; }
+    .value { font-size:28px; color:var(--accent); font-weight:600; }
+    button, select, input { background:#2a2a2a; color:var(--text); border:1px solid #444; border-radius:8px; padding:10px 12px; }
+    button.primary { background:var(--accent); color:#111; font-weight:700; border:none; }
+    .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+    pre { background:#151515; border:1px solid #333; border-radius:8px; padding:10px; overflow:auto; max-height:240px; font-size:12px; }
+  </style>
+</head>
+<body>
+  <span class="badge">4.5.0-beta · public VPS</span>
+  <h1>🔥 Котел</h1>
+  <div class="sub">Данные с устройства через Германию <code>151.247.208.17</code>. Управление — очередь команд на VPS.</div>
+
+  <div class="grid">
+    <div class="card"><div class="label">Подача</div><div class="value"><span id="supply">--</span></div></div>
+    <div class="card"><div class="label">Дымоход</div><div class="value"><span id="flue">--</span></div></div>
+    <div class="card"><div class="label">Дом</div><div class="value"><span id="home">--</span></div></div>
+    <div class="card"><div class="label">Fan %</div><div class="value"><span id="fan">--</span></div></div>
+  </div>
+
+  <div class="card" style="margin-top:10px">
+    <div class="label">Состояние</div>
+    <div id="meta">загрузка…</div>
+    <div class="row">
+      <select id="mode">
+        <option value="auto">Авто</option>
+        <option value="comfort">Комфорт</option>
+        <option value="neuro">Нейро</option>
+      </select>
+      <button class="primary" onclick="sendCmd({type:'set_mode', mode: mode.value})">Сменить режим</button>
+      <button onclick="sendCmd({type:'set_enabled', enabled:true})">Система ВКЛ</button>
+      <button onclick="sendCmd({type:'set_enabled', enabled:false})">Система ВЫКЛ</button>
+    </div>
+    <div class="row">
+      <input id="token" type="password" placeholder="Bearer token" style="min-width:220px" />
+      <input id="device" value="esp32-boiler-1" style="min-width:160px" />
+      <button onclick="refresh()">Обновить</button>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:10px">
+    <div class="label">Сырой sample</div>
+    <pre id="raw">—</pre>
+  </div>
+
+  <script>
+    const device = () => document.getElementById('device').value.trim() || 'esp32-boiler-1';
+    const token = () => document.getElementById('token').value.trim();
+    const fmt = (v) => (v === null || v === undefined || Number.isNaN(v)) ? '--' : Number(v).toFixed(1);
+
+    async function refresh() {
+      const r = await fetch('/api/v1/devices/' + encodeURIComponent(device()) + '/latest');
+      const d = await r.json();
+      const s = d.sample || {};
+      const t = s.temps || {};
+      const a = s.actuators || {};
+      document.getElementById('supply').textContent = fmt(t.supply);
+      document.getElementById('flue').textContent = fmt(t.flue);
+      document.getElementById('home').textContent = fmt(t.home);
+      document.getElementById('fan').textContent = (a.fan_power_pct ?? '--');
+      document.getElementById('meta').innerHTML =
+        `mode: <b>${s.mode || '—'}</b> · state: <b>${s.state || '—'}</b> · ts: ${d.ts || '—'} · safety: ${s.safety_trip ? '<span style="color:var(--bad)">TRIP</span>' : '<span style="color:var(--ok)">ok</span>'}`;
+      if (s.mode) document.getElementById('mode').value = s.mode;
+      document.getElementById('raw').textContent = JSON.stringify(d, null, 2);
+    }
+
+    async function sendCmd(cmd) {
+      if (!token()) { alert('Нужен INGEST_TOKEN'); return; }
+      const r = await fetch('/api/v1/devices/' + encodeURIComponent(device()) + '/commands', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token() },
+        body: JSON.stringify({ device_id: device(), cmd })
+      });
+      if (!r.ok) alert('Ошибка: ' + r.status);
+      else alert('Команда поставлена в очередь');
+    }
+
+    refresh();
+    setInterval(refresh, 3000);
+  </script>
+</body>
+</html>

@@ -75,6 +75,10 @@
       <div class="value"><span id="ret">--</span><small> °C</small></div>
     </div>
     <div class="card">
+      <div class="label">Дом (MQTT)</div>
+      <div class="value"><span id="home">--</span><small> °C</small></div>
+    </div>
+    <div class="card">
       <div class="label">Котельная / Улица</div>
       <div class="value" style="font-size:22px">
         <span id="boiler">--</span> / <span id="outdoor">--</span><small> °C</small>
@@ -140,9 +144,12 @@
       document.getElementById('supply').textContent = fmt(d.supplyTemp);
       document.getElementById('flue').textContent = fmt(d.flueTemp);
       document.getElementById('ret').textContent = fmt(d.returnTemp);
+      document.getElementById('home').textContent = fmt(d.homeTemp);
       document.getElementById('boiler').textContent = fmt(d.boilerTemp);
       document.getElementById('outdoor').textContent = fmt(d.outdoorTemp);
-      document.getElementById('mode').textContent = d.modeRu || d.mode;
+      const modeNote = (d.mode === 'comfort' && d.homeOnline === false)
+        ? ' (дом offline → Auto)' : '';
+      document.getElementById('mode').textContent = (d.modeRu || d.mode) + modeNote;
       document.getElementById('state').textContent = d.state || '';
       document.getElementById('fanPct').textContent = d.fanPowerPct ?? 0;
       document.getElementById('fanRelay').textContent = d.fan ? 'ON' : 'OFF';

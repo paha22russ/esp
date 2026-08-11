@@ -30,7 +30,10 @@ constexpr uint8_t FAN_ON_THRESHOLD_PCT = 1;  // >=1% → реле ON в теку
 constexpr uint32_t PUMP_AFTERHEAT_MS = 10UL * 60UL * 1000UL; // 10 мин после выкл вентилятора
 
 // VPS
-constexpr const char* DEFAULT_VPS_BASE_URL = "";  // задаётся в настройках
+constexpr const char* DEFAULT_VPS_BASE_URL = "http://151.247.208.17";
 constexpr uint16_t VPS_HTTP_TIMEOUT_MS = 4000;
+
+// Дом по MQTT
+constexpr uint32_t HOME_TEMP_STALE_MS = 5UL * 60UL * 1000UL;  // 5 мин
 
 }  // namespace cfg

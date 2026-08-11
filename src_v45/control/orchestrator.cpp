@@ -35,7 +35,17 @@ void BoilerOrchestrator::tick(PlantState& plant, uint32_t nowMs) {
 
   ControlOutput out;
   if (_mode == WorkMode::Comfort) {
-    out = _comfort.tick(plant, nowMs);
+    // Политика: Comfort только при валидном доме (MQTT). Иначе — Авто.
+    if (plant.home.quality != SensorQuality::Ok) {
+      out = _auto.tick(plant, nowMs);
+      strncpy(out.stateName, "comfort_fallback_auto", sizeof(out.stateName) - 1);
+    } else {
+      out = _comfort.tick(plant, nowMs);
+      if (strcmp(out.stateName, "comfort_home_offline") == 0) {
+        out = _auto.tick(plant, nowMs);
+        strncpy(out.stateName, "comfort_fallback_auto", sizeof(out.stateName) - 1);
+      }
+    }
   } else if (_mode == WorkMode::Neuro) {
     // Этап 1: Neuro только наблюдает. Железом управляет теневой Auto,
     // чтобы продолжать собирать (state, action) без отдельного «ручного» режима.

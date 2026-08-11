@@ -77,3 +77,27 @@ void VpsClient::tick(uint32_t nowMs) {
   // неблокирующе — по одному сообщению за тик
   _flushOne();
 }
+
+void VpsClient::pollCommands(uint32_t nowMs) {
+  if (!_onCmd || _base.length() == 0) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (_lastCmdPollMs != 0 && (nowMs - _lastCmdPollMs) < 3000) return;
+  _lastCmdPollMs = nowMs;
+
+  HTTPClient http;
+  const String url = _base + "/api/v1/devices/" + _deviceId + "/commands/next";
+  if (!http.begin(url)) return;
+  http.setTimeout(4000);
+  if (_token.length()) http.addHeader("Authorization", "Bearer " + _token);
+  const int code = http.GET();
+  if (code >= 200 && code < 300) {
+    String body = http.getString();
+    StaticJsonDocument<512> doc;
+    if (!deserializeJson(doc, body) && !doc["cmd"].isNull()) {
+      String cmd;
+      serializeJson(doc["cmd"], cmd);
+      _onCmd(cmd.c_str());
+    }
+  }
+  http.end();
+}

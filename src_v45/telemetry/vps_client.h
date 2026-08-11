@@ -18,6 +18,11 @@ class VpsClient {
   bool enqueueUserEvent(UserEventType type, const char* text, const char* rawAudioUrl,
                         uint32_t unixTs, const PlantState* snapshot);
 
+  // Опрос очереди команд с VPS (публичный веб → ESP)
+  using CommandHandler = void (*)(const char* jsonCmd);
+  void setCommandHandler(CommandHandler h) { _onCmd = h; }
+  void pollCommands(uint32_t nowMs);
+
   size_t queueSize() const { return _qCount; }
 
  private:
@@ -26,6 +31,8 @@ class VpsClient {
   String _deviceId = "esp32-boiler-1";
   String _token;
   uint32_t _lastFlushMs = 0;
+  uint32_t _lastCmdPollMs = 0;
+  CommandHandler _onCmd = nullptr;
 
   String _queue[Q_CAP];
   size_t _qHead = 0;

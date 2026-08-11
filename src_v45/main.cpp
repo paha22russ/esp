@@ -9,34 +9,41 @@
 #include "config/version.h"
 #include "config/pins.h"
 #include "config/defaults.h"
+#include "config/ota_urls.h"
 #include "app/types.h"
+#include "app/ota_channel.h"
 #include "hal/actuators.h"
 #include "sensors/sensor_hub.h"
+#include "sensors/home_mqtt.h"
 #include "control/safety.h"
 #include "control/orchestrator.h"
 #include "telemetry/vps_client.h"
 #include "events/journal.h"
 #include "events/user_events.h"
 #include "ml/hypothesis_engine.h"
+#include "ui/encoder_menu.h"
 
 FanActuator gFan;
 PumpActuator gPump;
 SensorPowerRelay gSensorPwr;
 SensorHub gSensors;
+HomeMqttSensor gHomeMqtt;
 SafetyGuard gSafety;
 BoilerOrchestrator gOrch;
 VpsClient gVps;
 EventJournal gJournal;
 UserEventService gUserEvents;
 HypothesisEngine gHypotheses;
+OtaChannelV45 gOta;
+EncoderMenu gMenu;
 PlantState gPlant;
 WebServer gServer(80);
+WiFiClient gWifiClient;
 
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C gOled(U8G2_R0, /* reset=*/U8X8_PIN_NONE, PIN_OLED_SCL, PIN_OLED_SDA);
 
 uint32_t gLastTelemetryMs = 0;
 uint32_t gLastControlMs = 0;
-uint32_t gLastOledMs = 0;
 
 static void dsLog(const char* code, const char* detail) {
   gJournal.add(code, detail, 0);
@@ -44,36 +51,21 @@ static void dsLog(const char* code, const char* detail) {
 
 static uint32_t unixNow() { return 0; }
 
-static void drawOled() {
-  gOled.clearBuffer();
-  gOled.setFont(u8g2_font_6x12_tf);
-  gOled.drawStr(0, 10, "Boiler 4.5-beta");
+static void onMenuMode(WorkMode m) {
+  gOrch.setMode(m);
+  gJournal.add("mode_change", workModeName(m), unixNow());
+}
 
-  char line[40];
-  snprintf(line, sizeof(line), "Mode:%s", workModeNameRu(gPlant.mode));
-  gOled.drawStr(0, 24, line);
-
-  if (gPlant.supply.quality == SensorQuality::Ok)
-    snprintf(line, sizeof(line), "Supply:%.1fC", gPlant.supply.celsius);
-  else
-    snprintf(line, sizeof(line), "Supply: --");
-  gOled.drawStr(0, 38, line);
-
-  if (gPlant.flue.quality == SensorQuality::Ok)
-    snprintf(line, sizeof(line), "Flue:%.0f Fan:%u%%", gPlant.flue.celsius, (unsigned)gPlant.fanPowerPct);
-  else
-    snprintf(line, sizeof(line), "Flue: -- Fan:%u%%", (unsigned)gPlant.fanPowerPct);
-  gOled.drawStr(0, 52, line);
-
-  if (gPlant.safetyTrip) gOled.drawStr(0, 64, "SAFETY!");
-  else gOled.drawStr(0, 64, gOrch.lastStateName());
-  gOled.sendBuffer();
+static void onMenuEnable(bool en) {
+  gPlant.systemEnabled = en;
+  gJournal.add(en ? "system_on" : "system_off", "encoder", unixNow());
 }
 
 static void handleStatus() {
   StaticJsonDocument<1536> doc;
   doc["version"] = FIRMWARE_VERSION;
   doc["channel"] = FIRMWARE_CHANNEL;
+  doc["otaChannel"] = OTA_CHANNEL;
   doc["mode"] = workModeName(gPlant.mode);
   doc["modeRu"] = workModeNameRu(gPlant.mode);
   doc["state"] = gOrch.lastStateName();
@@ -83,6 +75,7 @@ static void handleStatus() {
   doc["pump"] = gPlant.pumpOn;
   doc["safetyTrip"] = gPlant.safetyTrip;
   doc["safetyReason"] = gPlant.safetyReason;
+  doc["homeOnline"] = gHomeMqtt.online();
 
   if (gPlant.supply.quality == SensorQuality::Ok) doc["supplyTemp"] = gPlant.supply.celsius;
   else doc["supplyTemp"] = nullptr;
@@ -94,12 +87,16 @@ static void handleStatus() {
   else doc["boilerTemp"] = nullptr;
   if (gPlant.outdoor.quality == SensorQuality::Ok) doc["outdoorTemp"] = gPlant.outdoor.celsius;
   else doc["outdoorTemp"] = nullptr;
+  if (gPlant.home.quality == SensorQuality::Ok) doc["homeTemp"] = gPlant.home.celsius;
+  else doc["homeTemp"] = nullptr;
 
   doc["autoMin"] = gPlant.autoMinC;
   doc["autoMax"] = gPlant.autoMaxC;
+  doc["comfortRoom"] = gPlant.comfortRoomTargetC;
   doc["wifi"] = (WiFi.status() == WL_CONNECTED) ? "up" : "down";
   doc["vpsQueue"] = (int)gVps.queueSize();
   doc["hypotheses"] = (int)gHypotheses.count();
+  doc["flashPolicy"] = "clean_only_no_migrate_from_4_2";
 
   String out;
   serializeJson(doc, out);
@@ -108,10 +105,7 @@ static void handleStatus() {
 
 static void handleModePost() {
   StaticJsonDocument<256> doc;
-  DeserializationError err = DeserializationError::Ok;
-  if (!gServer.hasArg("plain")) err = DeserializationError::EmptyInput;
-  else err = deserializeJson(doc, gServer.arg("plain"));
-  if (err) {
+  if (!gServer.hasArg("plain") || deserializeJson(doc, gServer.arg("plain"))) {
     gServer.send(400, "application/json", "{\"error\":\"bad_json\"}");
     return;
   }
@@ -124,6 +118,7 @@ static void handleModePost() {
     gServer.send(400, "application/json", "{\"error\":\"unknown_mode\"}");
     return;
   }
+  // Comfort без дома — разрешаем выбрать, но runtime сразу уйдёт в fallback Auto
   gOrch.setMode(wm);
   gPlant.mode = wm;
   gJournal.add("mode_change", m, unixNow());
@@ -198,7 +193,7 @@ static void handleHypotheses() {
 static void handlePins() {
   StaticJsonDocument<1024> doc;
   doc["version"] = FIRMWARE_VERSION;
-  doc["note"] = "GPIO25 = реле снятия питания DS18B20, не питание от GPIO";
+  doc["note"] = "GPIO25 = реле снятия питания DS18B20, не питание от GPIO; GPIO2 свободен";
   doc["fan"] = PIN_RELAY_FAN;
   doc["pump"] = PIN_RELAY_PUMP;
   doc["sensor_power_relay"] = PIN_RELAY_SENSOR_PWR;
@@ -232,6 +227,24 @@ static void handleVpsSettings() {
   gServer.send(200, "application/json", "{\"success\":true}");
 }
 
+static void handleOtaCheck() {
+  String latest, err;
+  const bool avail = gOta.check(latest, err);
+  StaticJsonDocument<512> doc;
+  doc["channel"] = OTA_CHANNEL;
+  doc["currentVersion"] = FIRMWARE_VERSION;
+  doc["latestVersion"] = latest.length() ? latest : FIRMWARE_VERSION;
+  doc["updateAvailable"] = avail;
+  doc["versionUrl"] = OTA_VERSION_URL;
+  doc["firmwareUrl"] = OTA_FIRMWARE_URL;
+  doc["spiffsUrl"] = OTA_SPIFFS_URL;
+  doc["policy"] = "clean_flash_or_v45_ota_only_no_4_2_migrate";
+  if (err.length()) doc["error"] = err;
+  String out;
+  serializeJson(doc, out);
+  gServer.send(200, "application/json", out);
+}
+
 static void handleRoot() {
   if (SPIFFS.exists("/index.html")) {
     File f = SPIFFS.open("/index.html", "r");
@@ -248,27 +261,57 @@ static void handleRoot() {
 
 static void setupWifi() {
   WiFi.mode(WIFI_STA);
-  WiFi.begin();  // сохранённые credentials; иначе SoftAP позже
+  WiFi.begin();
   const uint32_t start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) {
     delay(200);
   }
-  Serial.printf("[WiFi] %s\n", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "not connected");
+  Serial.printf("[WiFi] %s\n",
+                WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "not connected");
+}
+
+static void onVpsCommand(const char* jsonCmd) {
+  StaticJsonDocument<512> doc;
+  if (deserializeJson(doc, jsonCmd)) return;
+  const char* type = doc["type"] | "";
+  if (!strcmp(type, "set_mode")) {
+    const char* m = doc["mode"] | "auto";
+    WorkMode wm = WorkMode::Auto;
+    if (!strcmp(m, "comfort")) wm = WorkMode::Comfort;
+    else if (!strcmp(m, "neuro")) wm = WorkMode::Neuro;
+    gOrch.setMode(wm);
+    gPlant.mode = wm;
+    gJournal.add("vps_cmd_mode", m, unixNow());
+  } else if (!strcmp(type, "set_enabled")) {
+    const bool en = doc["enabled"] | false;
+    gPlant.systemEnabled = en;
+    gJournal.add(en ? "vps_cmd_on" : "vps_cmd_off", "", unixNow());
+  } else if (!strcmp(type, "user_event")) {
+    const char* text = doc["text"] | "";
+    gUserEvents.ingestText(text, unixNow(), nullptr);
+  }
 }
 
 void setup() {
   Serial.begin(115200);
   delay(200);
   Serial.printf("\n=== %s %s (%s) ===\n", FIRMWARE_PRODUCT, FIRMWARE_VERSION, FIRMWARE_CHANNEL);
+  Serial.println("Flash policy: CLEAN ONLY — no migrate from 4.2.x");
 
   gFan.begin();
   gPump.begin();
   gSensorPwr.begin();
   gSensors.begin(&gSensorPwr);
   gSensors.ds().setLogger(dsLog);
+  gHomeMqtt.begin(&gWifiClient);
+  // брокер задаётся позже из настроек; топики дома по умолчанию
+  gHomeMqtt.setTopics("home/esp01/temp", "home/esp01/status");
   gSafety.begin(&gFan, &gPump);
   gOrch.begin(&gFan, &gPump, &gSafety);
   gVps.begin();
+  gVps.setBaseUrl(cfg::DEFAULT_VPS_BASE_URL);
+  gVps.setCommandHandler(onVpsCommand);
+  gOta.begin();
   gJournal.clear();
   gUserEvents.begin(&gJournal, &gVps, &gPlant);
   gHypotheses.begin(&gJournal);
@@ -277,7 +320,8 @@ void setup() {
   Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
   gOled.setI2CAddress(OLED_I2C_ADDR << 1);
   gOled.begin();
-  drawOled();
+  gMenu.begin(&gOled);
+  gMenu.setCallbacks(onMenuMode, onMenuEnable);
 
   if (!SPIFFS.begin(true)) {
     Serial.println("[SPIFFS] mount failed");
@@ -295,6 +339,7 @@ void setup() {
   gServer.on("/api/hypotheses", HTTP_GET, handleHypotheses);
   gServer.on("/api/pins", HTTP_GET, handlePins);
   gServer.on("/api/vps/settings", HTTP_POST, handleVpsSettings);
+  gServer.on("/api/update/check", HTTP_GET, handleOtaCheck);
   gServer.begin();
   Serial.println("[HTTP] ready");
 }
@@ -304,6 +349,8 @@ void loop() {
 
   gSensors.tick(now);
   gSensors.updatePlant(gPlant);
+  gHomeMqtt.tick(now);
+  gHomeMqtt.applyTo(gPlant);
   gPlant.sensorPowerOn = gSensorPwr.isPowered();
 
   if (now - gLastControlMs >= cfg::CONTROL_TICK_MS) {
@@ -317,11 +364,8 @@ void loop() {
     gVps.enqueueTelemetry(gPlant, gOrch.lastStateName(), unixNow());
   }
   gVps.tick(now);
+  gVps.pollCommands(now);
 
-  if (now - gLastOledMs >= 1000) {
-    gLastOledMs = now;
-    drawOled();
-  }
-
+  gMenu.tick(now, gPlant, gOrch.lastStateName());
   gServer.handleClient();
 }
