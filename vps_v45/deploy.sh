@@ -21,7 +21,14 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y docker.io docker-compose-v2 nginx curl ca-certificates rsync openssl
+# docker уже может быть от Docker CE (containerd.io) — не ставим docker.io
+apt-get install -y nginx curl ca-certificates rsync openssl || true
+if ! command -v docker >/dev/null 2>&1; then
+  apt-get install -y docker.io docker-compose-v2
+fi
+if ! docker compose version >/dev/null 2>&1; then
+  apt-get install -y docker-compose-v2 || true
+fi
 
 systemctl enable --now docker nginx
 
