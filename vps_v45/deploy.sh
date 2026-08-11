@@ -51,9 +51,13 @@ echo "---- INGEST_TOKEN (save for ESP) ----"
 grep '^INGEST_TOKEN=' "$APP_DIR/.env"
 echo "------------------------------------"
 
+# Полный UI 4.2 (копия data_v45) — тот же интерфейс, что на ESP SPIFFS
+REPO_ROOT="$(cd "$REPO_VPS_DIR/.." && pwd)"
+if [[ -f "$REPO_ROOT/data_v45/index.html" ]]; then
+  cp -f "$REPO_ROOT/data_v45/index.html" "$APP_DIR/web/index.html"
+fi
 rsync -a --delete "$APP_DIR/web/" "$WEB_ROOT/"
-sed -i "s#151\.247\.208\.17#${DOMAIN}#g" "$WEB_ROOT/index.html" || true
-sed -i "s#esp\.pahavpn\.cloud-ip\.cc#${DOMAIN}#g" "$WEB_ROOT/index.html" || true
+# VPS mirror: не трогаем разметку UI (совместима через /api/status stubs)
 
 cp "$APP_DIR/nginx/esp-boiler.conf" /etc/nginx/sites-available/esp-boiler
 ln -sfn /etc/nginx/sites-available/esp-boiler /etc/nginx/sites-enabled/esp-boiler

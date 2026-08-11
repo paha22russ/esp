@@ -22,6 +22,7 @@
 #include "events/user_events.h"
 #include "ml/hypothesis_engine.h"
 #include "ui/encoder_menu.h"
+#include "ui/legacy_http.h"
 
 FanActuator gFan;
 PumpActuator gPump;
@@ -61,204 +62,6 @@ static void onMenuEnable(bool en) {
   gJournal.add(en ? "system_on" : "system_off", "encoder", unixNow());
 }
 
-static void handleStatus() {
-  StaticJsonDocument<1536> doc;
-  doc["version"] = FIRMWARE_VERSION;
-  doc["channel"] = FIRMWARE_CHANNEL;
-  doc["otaChannel"] = OTA_CHANNEL;
-  doc["mode"] = workModeName(gPlant.mode);
-  doc["modeRu"] = workModeNameRu(gPlant.mode);
-  doc["state"] = gOrch.lastStateName();
-  doc["systemEnabled"] = gPlant.systemEnabled;
-  doc["fanPowerPct"] = gPlant.fanPowerPct;
-  doc["fan"] = gPlant.fanRelayOn;
-  doc["pump"] = gPlant.pumpOn;
-  doc["safetyTrip"] = gPlant.safetyTrip;
-  doc["safetyReason"] = gPlant.safetyReason;
-  doc["homeOnline"] = gHomeMqtt.online();
-
-  if (gPlant.supply.quality == SensorQuality::Ok) doc["supplyTemp"] = gPlant.supply.celsius;
-  else doc["supplyTemp"] = nullptr;
-  if (gPlant.flue.quality == SensorQuality::Ok) doc["flueTemp"] = gPlant.flue.celsius;
-  else doc["flueTemp"] = nullptr;
-  if (gPlant.ret.quality == SensorQuality::Ok) doc["returnTemp"] = gPlant.ret.celsius;
-  else doc["returnTemp"] = nullptr;
-  if (gPlant.boilerRoom.quality == SensorQuality::Ok) doc["boilerTemp"] = gPlant.boilerRoom.celsius;
-  else doc["boilerTemp"] = nullptr;
-  if (gPlant.outdoor.quality == SensorQuality::Ok) doc["outdoorTemp"] = gPlant.outdoor.celsius;
-  else doc["outdoorTemp"] = nullptr;
-  if (gPlant.home.quality == SensorQuality::Ok) doc["homeTemp"] = gPlant.home.celsius;
-  else doc["homeTemp"] = nullptr;
-
-  doc["autoMin"] = gPlant.autoMinC;
-  doc["autoMax"] = gPlant.autoMaxC;
-  doc["comfortRoom"] = gPlant.comfortRoomTargetC;
-  doc["wifi"] = (WiFi.status() == WL_CONNECTED) ? "up" : "down";
-  doc["vpsQueue"] = (int)gVps.queueSize();
-  doc["hypotheses"] = (int)gHypotheses.count();
-  doc["flashPolicy"] = "clean_only_no_migrate_from_4_2";
-
-  String out;
-  serializeJson(doc, out);
-  gServer.send(200, "application/json", out);
-}
-
-static void handleModePost() {
-  StaticJsonDocument<256> doc;
-  if (!gServer.hasArg("plain") || deserializeJson(doc, gServer.arg("plain"))) {
-    gServer.send(400, "application/json", "{\"error\":\"bad_json\"}");
-    return;
-  }
-  const char* m = doc["mode"] | "auto";
-  WorkMode wm = WorkMode::Auto;
-  if (!strcmp(m, "comfort")) wm = WorkMode::Comfort;
-  else if (!strcmp(m, "neuro")) wm = WorkMode::Neuro;
-  else if (!strcmp(m, "auto")) wm = WorkMode::Auto;
-  else {
-    gServer.send(400, "application/json", "{\"error\":\"unknown_mode\"}");
-    return;
-  }
-  // Comfort без дома — разрешаем выбрать, но runtime сразу уйдёт в fallback Auto
-  gOrch.setMode(wm);
-  gPlant.mode = wm;
-  gJournal.add("mode_change", m, unixNow());
-  gServer.send(200, "application/json", "{\"success\":true}");
-}
-
-static void handleEnable() {
-  const bool en = gServer.hasArg("enabled") && gServer.arg("enabled") == "1";
-  gPlant.systemEnabled = en;
-  gJournal.add(en ? "system_on" : "system_off", "", unixNow());
-  gServer.send(200, "application/json", "{\"success\":true}");
-}
-
-static void handleSetpoints() {
-  StaticJsonDocument<512> doc;
-  if (!gServer.hasArg("plain") || deserializeJson(doc, gServer.arg("plain"))) {
-    gServer.send(400, "application/json", "{\"error\":\"bad_json\"}");
-    return;
-  }
-  if (doc.containsKey("autoMin")) gPlant.autoMinC = doc["autoMin"];
-  if (doc.containsKey("autoMax")) gPlant.autoMaxC = doc["autoMax"];
-  if (doc.containsKey("comfortRoom")) gPlant.comfortRoomTargetC = doc["comfortRoom"];
-  if (doc.containsKey("comfortBoilerMin")) gPlant.comfortBoilerMinC = doc["comfortBoilerMin"];
-  if (doc.containsKey("comfortBoilerMax")) gPlant.comfortBoilerMaxC = doc["comfortBoilerMax"];
-  gServer.send(200, "application/json", "{\"success\":true}");
-}
-
-static void handleUserEvent() {
-  StaticJsonDocument<512> doc;
-  if (!gServer.hasArg("plain") || deserializeJson(doc, gServer.arg("plain"))) {
-    gServer.send(400, "application/json", "{\"error\":\"bad_json\"}");
-    return;
-  }
-  const char* text = doc["text"] | "";
-  const char* audio = doc["audio_url"] | "";
-  gUserEvents.ingestText(text, unixNow(), audio[0] ? audio : nullptr);
-  gServer.send(200, "application/json", "{\"success\":true}");
-}
-
-static void handleJournal() {
-  StaticJsonDocument<4096> doc;
-  JsonArray arr = doc.createNestedArray("entries");
-  for (size_t i = 0; i < gJournal.size(); i++) {
-    const auto& e = gJournal.at(i);
-    JsonObject o = arr.createNestedObject();
-    o["ms"] = e.ms;
-    o["code"] = e.code;
-    o["detail"] = e.detail;
-  }
-  String out;
-  serializeJson(doc, out);
-  gServer.send(200, "application/json", out);
-}
-
-static void handleHypotheses() {
-  StaticJsonDocument<3072> doc;
-  JsonArray arr = doc.createNestedArray("items");
-  for (size_t i = 0; i < gHypotheses.count(); i++) {
-    const Hypothesis& h = gHypotheses.at(i);
-    JsonObject o = arr.createNestedObject();
-    o["id"] = h.id;
-    o["text"] = h.text;
-    o["basis"] = h.basis;
-    o["confidence"] = h.confidence;
-    o["confirmed"] = h.confirmedByUser;
-  }
-  String out;
-  serializeJson(doc, out);
-  gServer.send(200, "application/json", out);
-}
-
-static void handlePins() {
-  StaticJsonDocument<1024> doc;
-  doc["version"] = FIRMWARE_VERSION;
-  doc["note"] = "GPIO25 = реле снятия питания DS18B20, не питание от GPIO; GPIO2 свободен";
-  doc["fan"] = PIN_RELAY_FAN;
-  doc["pump"] = PIN_RELAY_PUMP;
-  doc["sensor_power_relay"] = PIN_RELAY_SENSOR_PWR;
-  doc["ow1_return"] = PIN_ONEWIRE_BUS1;
-  doc["ow2_room_outdoor"] = PIN_ONEWIRE_BUS2;
-  doc["oled_sda"] = PIN_OLED_SDA;
-  doc["oled_scl"] = PIN_OLED_SCL;
-  doc["enc_clk"] = PIN_ENCODER_CLK;
-  doc["enc_dt"] = PIN_ENCODER_DT;
-  doc["enc_sw"] = PIN_ENCODER_SW;
-  doc["max31865_cs_flue"] = PIN_MAX31865_CS_FLUE;
-  doc["max31865_cs_supply"] = PIN_MAX31865_CS_SUPPLY;
-  doc["spi_sck"] = PIN_SPI_SCK;
-  doc["spi_mosi"] = PIN_SPI_MOSI;
-  doc["spi_miso"] = PIN_SPI_MISO;
-  String out;
-  serializeJson(doc, out);
-  gServer.send(200, "application/json", out);
-}
-
-static void handleVpsSettings() {
-  StaticJsonDocument<512> doc;
-  if (!gServer.hasArg("plain") || deserializeJson(doc, gServer.arg("plain"))) {
-    gServer.send(400, "application/json", "{\"error\":\"bad_json\"}");
-    return;
-  }
-  if (doc.containsKey("baseUrl")) gVps.setBaseUrl(String((const char*)doc["baseUrl"]));
-  if (doc.containsKey("token")) gVps.setAuthToken(String((const char*)doc["token"]));
-  if (doc.containsKey("deviceId")) gVps.setDeviceId(String((const char*)doc["deviceId"]));
-  gJournal.add("vps_settings", "updated", unixNow());
-  gServer.send(200, "application/json", "{\"success\":true}");
-}
-
-static void handleOtaCheck() {
-  String latest, err;
-  const bool avail = gOta.check(latest, err);
-  StaticJsonDocument<512> doc;
-  doc["channel"] = OTA_CHANNEL;
-  doc["currentVersion"] = FIRMWARE_VERSION;
-  doc["latestVersion"] = latest.length() ? latest : FIRMWARE_VERSION;
-  doc["updateAvailable"] = avail;
-  doc["versionUrl"] = OTA_VERSION_URL;
-  doc["firmwareUrl"] = OTA_FIRMWARE_URL;
-  doc["spiffsUrl"] = OTA_SPIFFS_URL;
-  doc["policy"] = "clean_flash_or_v45_ota_only_no_4_2_migrate";
-  if (err.length()) doc["error"] = err;
-  String out;
-  serializeJson(doc, out);
-  gServer.send(200, "application/json", out);
-}
-
-static void handleRoot() {
-  if (SPIFFS.exists("/index.html")) {
-    File f = SPIFFS.open("/index.html", "r");
-    gServer.streamFile(f, "text/html");
-    f.close();
-    return;
-  }
-  gServer.send(200, "text/html",
-              "<!doctype html><meta charset=utf-8><title>Котел 4.5-beta</title>"
-              "<body style='background:#111;color:#eee;font-family:sans-serif;padding:16px'>"
-              "<h1>Котел 4.5-beta</h1><p>SPIFFS UI отсутствует. API: /api/status</p>"
-              "</body>");
-}
-
 static void setupWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin();
@@ -275,13 +78,19 @@ static void onVpsCommand(const char* jsonCmd) {
   if (deserializeJson(doc, jsonCmd)) return;
   const char* type = doc["type"] | "";
   if (!strcmp(type, "set_mode")) {
-    const char* m = doc["mode"] | "auto";
     WorkMode wm = WorkMode::Auto;
-    if (!strcmp(m, "comfort")) wm = WorkMode::Comfort;
-    else if (!strcmp(m, "neuro")) wm = WorkMode::Neuro;
+    if (doc["mode"].is<int>()) {
+      const int m = doc["mode"];
+      if (m == 1) wm = WorkMode::Comfort;
+      else if (m == 2) wm = WorkMode::Neuro;
+    } else {
+      const char* m = doc["mode"] | "auto";
+      if (!strcmp(m, "comfort")) wm = WorkMode::Comfort;
+      else if (!strcmp(m, "neuro")) wm = WorkMode::Neuro;
+    }
     gOrch.setMode(wm);
     gPlant.mode = wm;
-    gJournal.add("vps_cmd_mode", m, unixNow());
+    gJournal.add("vps_cmd_mode", workModeName(wm), unixNow());
   } else if (!strcmp(type, "set_enabled")) {
     const bool en = doc["enabled"] | false;
     gPlant.systemEnabled = en;
@@ -304,7 +113,6 @@ void setup() {
   gSensors.begin(&gSensorPwr);
   gSensors.ds().setLogger(dsLog);
   gHomeMqtt.begin(&gWifiClient);
-  // брокер задаётся позже из настроек; топики дома по умолчанию
   gHomeMqtt.setTopics("home/esp01/temp", "home/esp01/status");
   gSafety.begin(&gFan, &gPump);
   gOrch.begin(&gFan, &gPump, &gSafety);
@@ -329,19 +137,10 @@ void setup() {
 
   setupWifi();
 
-  gServer.on("/", HTTP_GET, handleRoot);
-  gServer.on("/api/status", HTTP_GET, handleStatus);
-  gServer.on("/api/system/mode", HTTP_POST, handleModePost);
-  gServer.on("/api/system/enable", HTTP_POST, handleEnable);
-  gServer.on("/api/setpoints", HTTP_POST, handleSetpoints);
-  gServer.on("/api/events/user", HTTP_POST, handleUserEvent);
-  gServer.on("/api/journal", HTTP_GET, handleJournal);
-  gServer.on("/api/hypotheses", HTTP_GET, handleHypotheses);
-  gServer.on("/api/pins", HTTP_GET, handlePins);
-  gServer.on("/api/vps/settings", HTTP_POST, handleVpsSettings);
-  gServer.on("/api/update/check", HTTP_GET, handleOtaCheck);
+  legacyHttpRegister(gServer, gPlant, gOrch, gHomeMqtt, gVps, gJournal, gUserEvents, gHypotheses, gOta,
+                     gFan, gPump, gSensorPwr);
   gServer.begin();
-  Serial.println("[HTTP] ready");
+  Serial.println("[HTTP] legacy UI API ready");
 }
 
 void loop() {
