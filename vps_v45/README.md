@@ -1,6 +1,6 @@
 # Публичный UI котла 4.5-beta (Германия)
 
-**URL:** http://esp.pahavpn.cloud-ip.cc  
+**URL:** https://esp.pahavpn.cloud-ip.cc  
 **IP:** 151.247.208.17 (`de-vmpico`)  
 **DNS:** CloudDNS A → OK
 
@@ -16,7 +16,7 @@ VPS Monitor на том же IP не ломаем.
 Browser  →  nginx :80  (server_name esp.pahavpn.cloud-ip.cc)
               ├─ /        → /var/www/esp-boiler
               └─ /api/    → 127.0.0.1:8088 (Docker ingest)
-ESP      →  http://esp.pahavpn.cloud-ip.cc/api/v1/ingest
+ESP      →  https://esp.pahavpn.cloud-ip.cc/api/v1/ingest
 ESP      ←  .../commands/next
 ```
 
@@ -42,5 +42,5 @@ bash /opt/esp-tmp/vps_v45/deploy.sh
 EOS
 ```
 
-После деплоя откройте: **http://esp.pahavpn.cloud-ip.cc/**  
+После деплоя откройте: **https://esp.pahavpn.cloud-ip.cc/**  
 Токен: `grep INGEST_TOKEN /opt/boiler-v45/.env` → в настройки ESP.
