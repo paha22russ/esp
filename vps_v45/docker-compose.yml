@@ -1,10 +1,8 @@
-# VPS Germany 4.5-beta — публичный веб + ingest
+# VPS Germany — публичный UI котла 4.5-beta
 #
-# Хост: 151.247.208.17
-# Цель: страница с данными и управлением открывается из любой сети.
-#
-# ESP шлёт телеметрию на http://151.247.208.17/api/v1/ingest
-# Браузер открывает http://151.247.208.17/ (или https после TLS)
+# Домен: esp.pahavpn.cloud-ip.cc → 151.247.208.17
+# На хосте уже есть nginx (VPS Monitor). Caddy на :80 НЕ поднимаем.
+# Схема: nginx (vhost) → static web + reverse_proxy → ingest :8088
 
 services:
   db:
@@ -17,6 +15,7 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     restart: unless-stopped
+    networks: [boiler_net]
 
   ingest:
     build: ./ingest
@@ -24,21 +23,14 @@ services:
       DATABASE_URL: postgres://boiler:${POSTGRES_PASSWORD:-change_me_now}@db:5432/boiler
       INGEST_TOKEN: ${INGEST_TOKEN:-dev-token-change-me}
       CORS_ORIGIN: "*"
+    ports:
+      - "127.0.0.1:8088:8080"
     depends_on: [db]
     restart: unless-stopped
+    networks: [boiler_net]
 
-  web:
-    image: caddy:2
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./web:/srv:ro
-      - caddy_data:/data
-    depends_on: [ingest]
-    restart: unless-stopped
+networks:
+  boiler_net:
 
 volumes:
   pgdata:
-  caddy_data:

@@ -1,52 +1,46 @@
-# Деплой VPS Germany (4.5-beta)
+# Публичный UI котла 4.5-beta (Германия)
 
-**Хост:** `151.247.208.17`  
-**Цель:** веб с данными и управлением открывается из любой сети.
+**URL:** http://esp.pahavpn.cloud-ip.cc  
+**IP:** 151.247.208.17 (`de-vmpico`)  
+**DNS:** CloudDNS A → OK
 
-## Как это работает
+## Важно про HTTPS
+
+На этом VPS **порт 443 занят VPN/REALITY** (handshake reset).  
+Поэтому публичный интерфейс котла работает по **HTTP :80** через отдельный nginx `server_name`.  
+VPS Monitor на том же IP не ломаем.
+
+## Архитектура
 
 ```
-Браузер (телефон/ПК) ──HTTP──► VPS :80 (Caddy + web UI)
-                                   │
-ESP32 ──telemetry──POST /api/v1/ingest──┘
-ESP32 ◄──commands──GET  /api/v1/devices/{id}/commands/next
+Browser  →  nginx :80  (server_name esp.pahavpn.cloud-ip.cc)
+              ├─ /        → /var/www/esp-boiler
+              └─ /api/    → 127.0.0.1:8088 (Docker ingest)
+ESP      →  http://esp.pahavpn.cloud-ip.cc/api/v1/ingest
+ESP      ←  .../commands/next
 ```
 
-Прямой доступ к домашнему ESP из интернета **не обязателен**.  
-Публичный UI живёт на VPS; ESP пушит телеметрию и забирает команды.
+## Деплой
 
-## Установка на сервере
+На сервере:
 
 ```bash
-ssh root@151.247.208.17   # или ваш пользователь
-sudo apt update && sudo apt install -y docker.io docker-compose-v2 git
-git clone <repo> && cd <repo>/vps_v45
-cp .env.example .env   # задать пароли/токен
-sudo docker compose up -d --build
-curl http://127.0.0.1/api/v1/health
+git clone https://github.com/paha22russ/esp.git
+cd esp && git checkout cursor/architecture-4-5-beta-44fa
+sudo bash vps_v45/deploy.sh
 ```
 
-Открыть в браузере: **http://151.247.208.17/**
+Или одной командой с вашей машины (если есть SSH):
 
-## Переменные (.env)
-
+```bash
+ssh root@151.247.208.17 'bash -s' <<'EOS'
+set -e
+apt-get update -y && apt-get install -y git
+cd /opt
+rm -rf esp-tmp && git clone --branch cursor/architecture-4-5-beta-44fa --depth 1 https://github.com/paha22russ/esp.git esp-tmp
+bash /opt/esp-tmp/vps_v45/deploy.sh
+EOS
 ```
-POSTGRES_PASSWORD=...
-INGEST_TOKEN=...
-```
 
-На ESP: `POST /api/vps/settings` с `baseUrl=http://151.247.208.17`, тот же `token`.
-
-## TLS
-
-Когда будет домен — прописать его в `Caddyfile` (пример в файле). По IP Caddy отдаёт HTTP :80.
-
-## Firewall
-
-Открыть `80/tcp` (и `443/tcp` после TLS). Postgres наружу не открывать.
-
-## Безопасность
-
-- Сменить `INGEST_TOKEN` сразу.
-- Команды управления требуют Bearer token.
-- Safety на ESP не зависит от VPS.
+После деплоя откройте: **http://esp.pahavpn.cloud-ip.cc/**  
+Токен: `grep INGEST_TOKEN /opt/boiler-v45/.env` → в настройки ESP.

@@ -10,7 +10,7 @@
 | `esp32dev_v45` | **4.5.0-beta** (отдельно) | `src_v45/` | `data_v45/` |
 
 Документация beta: `docs/architecture-4.5-beta.md`, `docs/vps-setup-4.5-beta.md`, `docs/clarifications-4.5-beta.md`.  
-Публичный стек VPS (Германия `151.247.208.17`): каталог `vps_v45/`.
+Публичный стек VPS (Германия `esp.pahavpn.cloud-ip.cc`): каталог `vps_v45/`.
 
 ```bash
 pio run -e esp32dev_v45

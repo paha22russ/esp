@@ -64,8 +64,8 @@
 
 ## Публичный веб
 
-VPS `151.247.208.17` (`vps_v45/`): Caddy + web UI + ingest API.  
-Браузер ↔ VPS; ESP пушит телеметрию и забирает команды.
+VPS `esp.pahavpn.cloud-ip.cc` (`151.247.208.17`, `vps_v45/`): nginx vhost + ingest API.  
+Браузер ↔ VPS; ESP пушит телеметрию и забирает команды. HTTPS/:443 на этом хосте занят VPN — UI по HTTP. HTTPS/:443 на этом хосте занят VPN — UI по HTTP.
 
 ## DS18B20 recovery
 
