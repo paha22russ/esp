@@ -87,6 +87,8 @@
       max-height: 100%;
       gap: 5px;
       overflow: hidden;
+      position: relative;
+      padding-bottom: 34px;
     }
     #pageHome > .topbar,
     #pageHome > .summary-row,
@@ -94,9 +96,14 @@
     #pageHome > .home-grid-sec,
     #pageHome > .home-grid-2,
     #pageHome > .coal-card,
-    #pageHome > .alert,
-    #pageHome > .tech-row { margin: 0 !important; flex-shrink: 0; }
-    #pageHome > .tech-row { margin-top: auto !important; }
+    #pageHome > .alert { margin: 0 !important; flex-shrink: 0; }
+    #pageHome > .tech-row {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      margin: 0 !important;
+    }
 
     /* ===== Header (mock) ===== */
     .topbar {
@@ -320,16 +327,16 @@
     .tech-row {
       display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px;
       flex-shrink: 0;
-      padding-bottom: 2px;
+      height: 32px;
     }
     .tech-item {
       background: rgba(255,255,255,.03); border: 1px solid var(--line);
-      border-radius: 10px; padding: 6px 6px;
-      display: flex; flex-direction: row; gap: 5px; align-items: flex-start;
-      min-width: 0;
+      border-radius: 8px; padding: 4px 5px;
+      display: flex; flex-direction: row; gap: 4px; align-items: center;
+      min-width: 0; height: 100%;
     }
     .tech-dot {
-      width: 6px; height: 6px; border-radius: 50%; margin-top: 4px;
+      width: 6px; height: 6px; border-radius: 50%; margin-top: 0;
       background: var(--ok); flex-shrink: 0;
     }
     .tech-dot.bad { background: var(--bad); }
