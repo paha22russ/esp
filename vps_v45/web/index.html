@@ -85,10 +85,10 @@
       min-height: 0;
       height: auto;
       max-height: 100%;
-      gap: 5px;
+      gap: 4px;
       overflow: hidden;
       position: relative;
-      padding-bottom: 34px;
+      padding-bottom: 0;
     }
     #pageHome > .topbar,
     #pageHome > .summary-row,
@@ -96,14 +96,14 @@
     #pageHome > .home-grid-sec,
     #pageHome > .home-grid-2,
     #pageHome > .coal-card,
-    #pageHome > .alert { margin: 0 !important; flex-shrink: 0; }
-    #pageHome > .tech-row {
-      position: absolute;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      margin: 0 !important;
-    }
+    #pageHome > .alert,
+    #pageHome > .tech-row { margin: 0 !important; flex-shrink: 0; }
+    #pageHome > .tech-row { margin-top: 2px !important; }
+
+    .sum-ico { display: none; }
+    .sum-card { padding: 6px 6px 7px; }
+    .home-grid-2 .muted,
+    .home-grid-2 .label + .equip-state + .muted { }
 
     /* ===== Header (mock) ===== */
     .topbar {
@@ -272,6 +272,7 @@
     .equip-ico.on { color: var(--ok); background: rgba(47,213,115,.1); border-color: rgba(47,213,115,.28); }
     .equip-state { font-weight: 800; margin-top: 1px; font-size: .82rem; }
     .equip-state.on { color: var(--ok); }
+    #fanPower { font-size: .58rem; line-height: 1.1; }
     .ring {
       --p: 0;
       width: 34px; height: 34px; border-radius: 50%;
@@ -609,8 +610,8 @@
         <div class="coal-row">
           <div>
             <div class="label" style="color:var(--warn)">Подброс угля</div>
-            <div class="muted" id="coalHint" style="margin-top:4px">Запуск цикла подброса</div>
             <div class="coal-timer hidden" id="coalTimer">02:45</div>
+            <div class="muted hidden" id="coalHint">Запуск цикла подброса</div>
           </div>
           <button class="btn primary" type="button" id="coalBtn">▶ Запустить</button>
         </div>
