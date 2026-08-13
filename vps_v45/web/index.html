@@ -3,189 +3,193 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#0c0e12" />
+  <meta name="theme-color" content="#0b0d12" />
   <title>Котёл</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet" />
   <style>
     :root {
-      --bg: #0c0e12;
-      --bg-elev: #141820;
-      --card: #1a1f2a;
-      --card-2: #222836;
-      --line: rgba(255,255,255,0.08);
-      --text: #f2f4f8;
+      --bg: #0b0d12;
+      --card: #161b24;
+      --card2: #1c2230;
+      --line: rgba(255,255,255,0.07);
+      --text: #f4f6fb;
       --muted: #8b93a7;
-      --ok: #2ecc71;
+      --ok: #2fd573;
       --info: #4da3ff;
       --warn: #ff8a3d;
-      --bad: #ff4d4f;
+      --bad: #ff4d57;
       --idle: #7a8499;
-      --accent: #ff8a3d;
-      --radius: 18px;
-      --shadow: 0 10px 30px rgba(0,0,0,0.35);
+      --radius: 20px;
       --safe-b: env(safe-area-inset-bottom, 0px);
-      --nav-h: 64px;
+      --nav-h: 72px;
     }
     * { box-sizing: border-box; }
     html, body { height: 100%; }
     body {
       margin: 0;
       font-family: Manrope, system-ui, sans-serif;
-      background:
-        radial-gradient(900px 420px at 10% -10%, #1a2438 0%, transparent 55%),
-        radial-gradient(700px 380px at 100% 0%, #2a1810 0%, transparent 50%),
-        var(--bg);
       color: var(--text);
+      background:
+        radial-gradient(1000px 500px at 0% -5%, #1a2740 0%, transparent 55%),
+        radial-gradient(800px 420px at 110% 0%, #2a170e 0%, transparent 45%),
+        var(--bg);
       -webkit-tap-highlight-color: transparent;
     }
     button, input, select { font: inherit; color: inherit; }
     .app {
-      max-width: 520px;
+      width: min(430px, 100%);
       margin: 0 auto;
       min-height: 100%;
-      padding: 12px 14px calc(var(--nav-h) + 18px + var(--safe-b));
+      padding: 14px 14px calc(var(--nav-h) + 16px + var(--safe-b));
     }
     @media (min-width: 900px) {
-      .app { max-width: 980px; padding-bottom: 28px; }
-      .desktop-2 { display: grid; grid-template-columns: 1.2fr 1fr; gap: 12px; }
-      .desktop-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
-      .desktop-2eq { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+      .app { width: min(980px, 100%); padding-bottom: 28px; }
       .bottom-nav { display: none !important; }
-      .app { padding-bottom: 28px; }
+      .home-grid-primary { grid-template-columns: 1fr 1fr !important; }
+      .home-grid-sec { grid-template-columns: repeat(4, 1fr) !important; }
+      .home-grid-2 { grid-template-columns: 1fr 1fr !important; }
+      .tech-row { grid-template-columns: repeat(4, 1fr) !important; }
     }
-
-    /* Header */
-    .topbar {
-      display: flex; align-items: center; justify-content: space-between;
-      margin-bottom: 14px; gap: 10px;
-    }
-    .brand {
-      display: flex; align-items: center; gap: 10px;
-      font-weight: 800; letter-spacing: 0.04em; font-size: 1.15rem;
-    }
-    .brand-mark {
-      width: 36px; height: 36px; border-radius: 12px;
-      display: grid; place-items: center;
-      background: linear-gradient(145deg, #ff9a4d, #e85d04);
-      box-shadow: 0 6px 16px rgba(232,93,4,0.35);
-      font-size: 1.1rem;
-    }
-    .icon-btn {
-      width: 44px; height: 44px; border-radius: 14px;
-      border: 1px solid var(--line); background: var(--card);
-      display: grid; place-items: center; cursor: pointer;
-    }
-    .icon-btn:active { transform: scale(0.97); }
-
-    /* Cards */
-    .card {
-      background: linear-gradient(180deg, var(--card) 0%, #171c26 100%);
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      padding: 14px 16px;
-      box-shadow: var(--shadow);
-    }
-    .card + .card, .stack > * + * { margin-top: 10px; }
-    .label {
-      color: var(--muted); font-size: 0.72rem; font-weight: 700;
-      letter-spacing: 0.08em; text-transform: uppercase;
-    }
-    .muted { color: var(--muted); font-size: 0.85rem; }
-
-    /* Hero status */
-    .status-hero {
-      display: flex; gap: 14px; align-items: center;
-      padding: 16px 18px;
-      border-radius: 22px;
-      border: 1px solid var(--line);
-      background: linear-gradient(135deg, #1b2333, #151a24);
-      transition: background .35s ease, border-color .35s ease;
-    }
-    .status-hero[data-tone="ok"] { border-color: rgba(46,204,113,.35); background: linear-gradient(135deg,#14261c,#151a24); }
-    .status-hero[data-tone="info"] { border-color: rgba(77,163,255,.35); background: linear-gradient(135deg,#142033,#151a24); }
-    .status-hero[data-tone="warn"] { border-color: rgba(255,138,61,.4); background: linear-gradient(135deg,#2a1a10,#151a24); }
-    .status-hero[data-tone="bad"] { border-color: rgba(255,77,79,.45); background: linear-gradient(135deg,#2a1214,#151a24); }
-    .status-hero[data-tone="idle"] { border-color: rgba(122,132,153,.35); }
-    .status-dot {
-      width: 14px; height: 14px; border-radius: 50%;
-      background: var(--ok); box-shadow: 0 0 0 6px rgba(46,204,113,.15);
-      flex-shrink: 0;
-      animation: pulse 2.2s ease-in-out infinite;
-    }
-    .status-hero[data-tone="info"] .status-dot { background: var(--info); box-shadow: 0 0 0 6px rgba(77,163,255,.15); }
-    .status-hero[data-tone="warn"] .status-dot { background: var(--warn); box-shadow: 0 0 0 6px rgba(255,138,61,.18); }
-    .status-hero[data-tone="bad"] .status-dot { background: var(--bad); box-shadow: 0 0 0 6px rgba(255,77,79,.18); animation: none; }
-    .status-hero[data-tone="idle"] .status-dot { background: var(--idle); box-shadow: 0 0 0 6px rgba(122,132,153,.12); animation: none; }
-    @keyframes pulse { 0%,100%{ transform: scale(1);} 50%{ transform: scale(1.08);} }
-    .status-title { font-size: 1.15rem; font-weight: 800; margin: 0; }
-    .status-sub { margin: 2px 0 0; color: var(--muted); font-size: 0.9rem; }
 
     .conn-banner {
       display: none; margin: 0 0 10px; padding: 10px 12px; border-radius: 14px;
-      background: rgba(255,77,79,.12); border: 1px solid rgba(255,77,79,.35);
-      color: #ffb3b4; font-size: 0.9rem; font-weight: 600;
+      background: rgba(255,77,87,.12); border: 1px solid rgba(255,77,87,.35);
+      color: #ffb4b8; font-size: .9rem; font-weight: 700;
     }
     .conn-banner.show { display: block; }
 
-    /* Temps */
-    .temp-big { font-size: clamp(2.4rem, 9vw, 3.2rem); font-weight: 800; letter-spacing: -0.03em; line-height: 1; }
-    .temp-unit { font-size: 1rem; color: var(--muted); font-weight: 700; margin-left: 4px; }
-    .trend { font-size: 0.95rem; margin-left: 6px; opacity: .9; }
-    .trend.up { color: var(--ok); }
-    .trend.down { color: var(--info); }
+    /* ===== Header (mock) ===== */
+    .topbar {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      margin-bottom: 14px;
+      gap: 8px;
+    }
+    .brand {
+      display: flex; align-items: center; gap: 8px;
+      font-weight: 800; letter-spacing: .06em; font-size: 1.05rem;
+    }
+    .brand-ico {
+      width: 34px; height: 34px; border-radius: 11px;
+      display: grid; place-items: center;
+      background: linear-gradient(145deg, #ff9f55, #e85d04);
+      box-shadow: 0 8px 18px rgba(232,93,4,.35);
+      font-size: 1rem;
+    }
+    .ver-pill {
+      justify-self: center;
+      background: #222836; color: #c9d0e0;
+      border: 1px solid var(--line);
+      border-radius: 999px; padding: 6px 12px;
+      font-size: .72rem; font-weight: 800; letter-spacing: .02em;
+      white-space: nowrap;
+    }
+    .top-right {
+      justify-self: end;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .wifi-chip {
+      display: flex; align-items: center; gap: 5px;
+      color: var(--muted); font-size: .78rem; font-weight: 700;
+    }
+    .icon-btn {
+      width: 40px; height: 40px; border-radius: 12px;
+      border: 1px solid var(--line); background: var(--card);
+      display: grid; place-items: center; cursor: pointer; font-size: 1.15rem;
+    }
+
+    .card {
+      background: linear-gradient(180deg, var(--card) 0%, #121821 100%);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 12px 13px;
+      box-shadow: 0 10px 28px rgba(0,0,0,.28);
+    }
+    .label {
+      color: var(--muted); font-size: .68rem; font-weight: 800;
+      letter-spacing: .1em; text-transform: uppercase;
+    }
+    .muted { color: var(--muted); font-size: .82rem; }
+
+    /* ===== 3 status summary cards ===== */
+    .summary-row {
+      display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;
+      margin-bottom: 10px;
+    }
+    .sum-card {
+      background: var(--card); border: 1px solid var(--line);
+      border-radius: 16px; padding: 10px 9px 11px; min-height: 88px;
+    }
+    .sum-ico {
+      width: 28px; height: 28px; border-radius: 9px;
+      display: grid; place-items: center; font-size: .95rem; margin-bottom: 8px;
+    }
+    .sum-ico.ok { background: rgba(47,213,115,.15); color: var(--ok); }
+    .sum-ico.info { background: rgba(77,163,255,.15); color: var(--info); }
+    .sum-ico.warn { background: rgba(255,138,61,.15); color: var(--warn); }
+    .sum-ico.bad { background: rgba(255,77,87,.15); color: var(--bad); }
+    .sum-ico.idle { background: rgba(122,132,153,.15); color: var(--idle); }
+    .sum-title { font-size: .78rem; font-weight: 800; line-height: 1.15; }
+    .sum-sub { margin-top: 3px; color: var(--muted); font-size: .68rem; line-height: 1.25; }
+
+    /* ===== Primary temps ===== */
+    .home-grid-primary {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px;
+    }
+    .temp-big {
+      font-size: clamp(2rem, 8.2vw, 2.55rem);
+      font-weight: 800; letter-spacing: -.03em; line-height: 1; margin-top: 8px;
+    }
+    .temp-unit { font-size: .95rem; color: var(--muted); font-weight: 700; margin-left: 2px; }
     .chip {
-      display: inline-flex; align-items: center; gap: 6px;
-      padding: 4px 10px; border-radius: 999px; font-size: 0.72rem; font-weight: 700;
-      background: rgba(46,204,113,.12); color: var(--ok); border: 1px solid rgba(46,204,113,.25);
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 3px 8px; border-radius: 999px; font-size: .65rem; font-weight: 800;
+      background: rgba(47,213,115,.12); color: var(--ok); border: 1px solid rgba(47,213,115,.28);
     }
     .chip.off { background: rgba(122,132,153,.12); color: var(--muted); border-color: rgba(122,132,153,.25); }
     .chip.blue { background: rgba(77,163,255,.12); color: var(--info); border-color: rgba(77,163,255,.28); }
     .chip.warn { background: rgba(255,138,61,.12); color: var(--warn); border-color: rgba(255,138,61,.3); }
-
     .gauge {
-      margin-top: 12px; height: 8px; border-radius: 999px;
-      background: rgba(255,255,255,0.06); position: relative; overflow: hidden;
+      margin-top: 12px; height: 7px; border-radius: 999px;
+      background: rgba(255,255,255,.06); position: relative; overflow: hidden;
     }
     .gauge > i {
-      position: absolute; left: 0; top: 0; bottom: 0; width: 0%;
-      background: linear-gradient(90deg, #2ecc71, #4da3ff);
-      border-radius: inherit; transition: width .6s ease;
+      position: absolute; inset: 0 auto 0 0; width: 0%;
+      background: linear-gradient(90deg, #2fd573, #4da3ff);
+      border-radius: inherit; transition: width .55s ease;
     }
     .gauge-meta {
       display: flex; justify-content: space-between; margin-top: 6px;
-      color: var(--muted); font-size: 0.72rem; font-weight: 600;
+      color: var(--muted); font-size: .68rem; font-weight: 700;
+    }
+    .setpoint-line { margin-top: 8px; color: var(--muted); font-size: .8rem; }
+    .setpoint-line b { color: var(--text); font-weight: 800; }
+
+    /* ===== Secondary 2x2 ===== */
+    .home-grid-sec {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px;
+    }
+    .mini .temp-big { font-size: 1.45rem; margin-top: 6px; }
+    .trend-line {
+      margin-top: 6px; font-size: .72rem; font-weight: 700; color: var(--muted);
+      min-height: 1.1em;
+    }
+    .trend-line.up { color: var(--warn); }
+    .trend-line.down { color: var(--info); }
+    .trend-line.flat { color: var(--muted); }
+
+    .home-grid-2 {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px;
     }
 
-    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .grid-4 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    @media (min-width: 900px) {
-      .grid-4 { grid-template-columns: repeat(4, 1fr); }
-    }
-    .mini-temp .temp-big { font-size: 1.55rem; }
-    .row-between { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-    .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-
-    /* Mode segmented */
-    .seg {
-      display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;
-      margin-top: 12px; padding: 4px; border-radius: 14px;
-      background: rgba(0,0,0,.25); border: 1px solid var(--line);
-    }
-    .seg button {
-      border: 0; background: transparent; color: var(--muted);
-      padding: 10px 6px; border-radius: 11px; font-weight: 700; cursor: pointer;
-    }
-    .seg button.active {
-      background: var(--card-2); color: var(--text);
-      box-shadow: 0 4px 12px rgba(0,0,0,.25);
-    }
-    .seg button:disabled { opacity: .45; cursor: not-allowed; }
-
-    /* Switch */
+    /* Mode / System */
+    .mode-card { cursor: pointer; }
+    .mode-name { margin-top: 8px; font-size: 1.35rem; font-weight: 800; }
     .switch {
-      position: relative; width: 54px; height: 32px; flex-shrink: 0;
+      position: relative; width: 52px; height: 32px; flex-shrink: 0;
     }
     .switch input { opacity: 0; width: 0; height: 0; }
     .switch span {
@@ -197,77 +201,136 @@
       left: 3px; top: 3px; background: #fff; transition: .2s;
     }
     .switch input:checked + span { background: var(--ok); }
-    .switch input:checked + span::before { transform: translateX(22px); }
+    .switch input:checked + span::before { transform: translateX(20px); }
+    .sys-state { margin-top: 8px; font-size: 1.05rem; font-weight: 800; color: var(--ok); }
+    .sys-state.off { color: var(--muted); }
 
-    .equip-icon {
-      width: 40px; height: 40px; border-radius: 12px;
-      display: grid; place-items: center; background: rgba(255,255,255,.04);
-      border: 1px solid var(--line); font-size: 1.1rem;
+    /* Equipment */
+    .equip {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
     }
-    .equip-icon.on { color: var(--ok); border-color: rgba(46,204,113,.3); background: rgba(46,204,113,.08); }
-    .ring {
-      --p: 100;
-      width: 42px; height: 42px; border-radius: 50%;
-      background: conic-gradient(var(--ok) calc(var(--p) * 1%), rgba(255,255,255,.08) 0);
+    .equip-left { display: flex; align-items: center; gap: 10px; }
+    .equip-ico {
+      width: 40px; height: 40px; border-radius: 12px;
       display: grid; place-items: center;
+      background: rgba(255,255,255,.04); border: 1px solid var(--line); font-size: 1.1rem;
+    }
+    .equip-ico.on { color: var(--ok); background: rgba(47,213,115,.1); border-color: rgba(47,213,115,.28); }
+    .equip-state { font-weight: 800; margin-top: 2px; }
+    .equip-state.on { color: var(--ok); }
+    .ring {
+      --p: 0;
+      width: 46px; height: 46px; border-radius: 50%;
+      background: conic-gradient(var(--ok) calc(var(--p) * 1%), rgba(255,255,255,.08) 0);
+      display: grid; place-items: center; flex-shrink: 0;
     }
     .ring::after {
-      content: ""; width: 30px; height: 30px; border-radius: 50%; background: var(--card);
+      content: ""; width: 32px; height: 32px; border-radius: 50%; background: var(--card);
     }
-    .fan-spin.on { animation: spin 1.4s linear infinite; }
+    .fan-spin.on { animation: spin 1.35s linear infinite; display: inline-block; }
     @keyframes spin { to { transform: rotate(360deg); } }
 
+    /* Coal */
+    .coal-card {
+      border-color: rgba(255,138,61,.32);
+      background: linear-gradient(180deg, #24180f 0%, #161b24 100%);
+      margin-bottom: 8px;
+    }
+    .coal-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .coal-timer {
+      margin-top: 6px; font-size: 1.35rem; font-weight: 800; color: var(--warn);
+      font-variant-numeric: tabular-nums;
+    }
     .btn {
-      border: 0; border-radius: 14px; padding: 12px 16px; font-weight: 800;
-      cursor: pointer; background: var(--card-2); color: var(--text);
-      border: 1px solid var(--line);
+      border: 0; border-radius: 14px; padding: 12px 14px; font-weight: 800; cursor: pointer;
+      background: var(--card2); border: 1px solid var(--line);
     }
     .btn.primary {
-      background: linear-gradient(135deg, #ff9a4d, #e85d04);
-      border: 0; color: #1a0d05;
+      background: linear-gradient(135deg, #ff9f55, #e85d04);
+      border: 0; color: #1a0d05; white-space: nowrap;
     }
     .btn.block { width: 100%; }
-    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn:disabled { opacity: .55; cursor: not-allowed; }
 
+    /* Alert */
     .alert {
       display: none; gap: 10px; align-items: flex-start;
-      border-radius: 16px; padding: 12px 14px;
-      border: 1px solid rgba(255,138,61,.35);
-      background: rgba(255,138,61,.1);
+      border-radius: 16px; padding: 12px 14px; margin-bottom: 10px;
+      border: 1px solid rgba(255,77,87,.4);
+      background: rgba(255,77,87,.1);
     }
     .alert.show { display: flex; }
-    .alert.bad {
-      border-color: rgba(255,77,79,.4);
-      background: rgba(255,77,79,.1);
+    .alert.warn-only {
+      border-color: rgba(255,138,61,.4);
+      background: rgba(255,138,61,.1);
     }
 
-    /* Sheets / pages */
-    .page { display: none; }
-    .page.active { display: block; animation: fade .2s ease; }
-    @keyframes fade { from { opacity: 0; transform: translateY(6px);} to { opacity: 1; transform: none;} }
+    /* Tech footer row (as on mock) */
+    .tech-row {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+      margin-bottom: 4px;
+    }
+    .tech-item {
+      background: rgba(255,255,255,.03); border: 1px solid var(--line);
+      border-radius: 14px; padding: 10px 11px;
+      display: flex; gap: 8px; align-items: flex-start;
+    }
+    .tech-dot {
+      width: 8px; height: 8px; border-radius: 50%; margin-top: 5px;
+      background: var(--ok); flex-shrink: 0;
+    }
+    .tech-dot.bad { background: var(--bad); }
+    .tech-dot.warn { background: var(--warn); }
+    .tech-dot.idle { background: var(--idle); }
+    .tech-k { font-size: .68rem; color: var(--muted); font-weight: 700; }
+    .tech-v { font-size: .82rem; font-weight: 800; margin-top: 1px; }
 
+    /* Mode picker sheet */
+    .sheet-bg {
+      position: fixed; inset: 0; background: rgba(0,0,0,.55);
+      opacity: 0; pointer-events: none; transition: .2s; z-index: 70;
+    }
+    .sheet-bg.open { opacity: 1; pointer-events: auto; }
+    .sheet {
+      position: fixed; left: 50%; bottom: 0; transform: translate(-50%, 110%);
+      width: min(430px, 100%); background: #12161f;
+      border: 1px solid var(--line); border-radius: 22px 22px 0 0;
+      padding: 16px 14px calc(18px + var(--safe-b)); transition: .25s; z-index: 80;
+    }
+    .sheet.open { transform: translate(-50%, 0); }
+    .sheet h3 { margin: 0 0 12px; font-size: 1rem; }
+    .sheet .opt {
+      width: 100%; text-align: left; margin-bottom: 8px;
+      padding: 14px; border-radius: 14px; border: 1px solid var(--line);
+      background: var(--card); cursor: pointer;
+    }
+    .sheet .opt.active { border-color: rgba(77,163,255,.45); background: #1a2436; }
+    .sheet .opt b { display: block; font-size: 1rem; }
+    .sheet .opt span { color: var(--muted); font-size: .82rem; }
+
+    /* Pages / menu / settings */
+    .page { display: none; }
+    .page.active { display: block; }
     .menu-list { display: grid; gap: 8px; }
     .menu-item {
       display: flex; align-items: center; justify-content: space-between;
       padding: 14px 16px; border-radius: 16px; background: var(--card);
       border: 1px solid var(--line); cursor: pointer; text-align: left; width: 100%;
     }
-    .menu-item:active { transform: scale(0.99); }
     .menu-item .left { display: flex; gap: 12px; align-items: center; }
     .menu-ico {
       width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center;
       background: rgba(255,255,255,.05); border: 1px solid var(--line);
     }
     .section-title {
-      margin: 18px 0 8px; color: var(--muted); font-size: 0.75rem;
+      margin: 18px 0 8px; color: var(--muted); font-size: .75rem;
       font-weight: 800; letter-spacing: .08em; text-transform: uppercase;
     }
-
     .settings-page { display: none; }
-    .settings-page.active { display: block; animation: fade .2s ease; }
+    .settings-page.active { display: block; }
     .back-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
     .field { margin-bottom: 12px; }
-    .field label { display: block; color: var(--muted); font-size: 0.8rem; font-weight: 600; margin-bottom: 6px; }
+    .field label { display: block; color: var(--muted); font-size: .8rem; font-weight: 600; margin-bottom: 6px; }
     .field input, .field select {
       width: 100%; padding: 12px 14px; border-radius: 12px;
       border: 1px solid var(--line); background: #10141c;
@@ -280,25 +343,28 @@
     .info-box {
       padding: 12px; border-radius: 14px; margin-bottom: 12px;
       background: rgba(77,163,255,.08); border: 1px solid rgba(77,163,255,.2);
-      color: var(--muted); font-size: 0.9rem;
+      color: var(--muted); font-size: .9rem;
     }
     .check { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+    .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .row-between { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .hidden { display: none !important; }
 
+    /* Bottom nav — 5 items as mock */
     .bottom-nav {
-      position: fixed; left: 0; right: 0; bottom: 0;
-      padding: 8px 10px calc(8px + var(--safe-b));
-      background: rgba(12,14,18,.92); backdrop-filter: blur(12px);
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+      padding: 8px 6px calc(8px + var(--safe-b));
+      background: rgba(11,13,18,.94); backdrop-filter: blur(14px);
       border-top: 1px solid var(--line);
-      display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px;
-      z-index: 40;
+      display: grid; grid-template-columns: repeat(5, 1fr); gap: 2px;
     }
     .bottom-nav button {
       border: 0; background: transparent; color: var(--muted);
-      padding: 8px 4px; border-radius: 12px; font-size: 0.72rem; font-weight: 700;
+      padding: 6px 2px; border-radius: 12px; font-size: .62rem; font-weight: 700;
       display: grid; gap: 2px; place-items: center; cursor: pointer;
     }
     .bottom-nav button.active { color: var(--info); }
-    .bottom-nav .nav-ico { font-size: 1.15rem; }
+    .bottom-nav .nav-ico { font-size: 1.15rem; line-height: 1; }
 
     .drawer-backdrop {
       position: fixed; inset: 0; background: rgba(0,0,0,.55);
@@ -312,167 +378,168 @@
       padding: 16px 14px calc(20px + var(--safe-b)); overflow: auto;
     }
     .drawer.open { transform: none; }
-
     .toast {
-      position: fixed; left: 50%; bottom: calc(var(--nav-h) + 24px + var(--safe-b));
-      transform: translateX(-50%) translateY(20px); opacity: 0;
-      background: #222836; border: 1px solid var(--line); color: var(--text);
-      padding: 10px 14px; border-radius: 12px; font-weight: 700; font-size: 0.9rem;
-      z-index: 80; transition: .2s; pointer-events: none; max-width: 90vw;
+      position: fixed; left: 50%; bottom: calc(var(--nav-h) + 20px + var(--safe-b));
+      transform: translateX(-50%) translateY(16px); opacity: 0;
+      background: #222836; border: 1px solid var(--line);
+      padding: 10px 14px; border-radius: 12px; font-weight: 700; font-size: .9rem;
+      z-index: 90; transition: .2s; pointer-events: none; max-width: 90vw;
     }
     .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-    @media (min-width: 900px) {
-      .toast { bottom: 28px; }
-    }
-
-    .hidden { display: none !important; }
+    @media (min-width: 900px) { .toast { bottom: 28px; } }
   </style>
 </head>
 <body>
   <div class="app">
     <div id="connBanner" class="conn-banner">Нет связи с котлом</div>
 
-    <!-- ===== HOME ===== -->
     <section id="pageHome" class="page active">
       <header class="topbar">
-        <div class="brand"><div class="brand-mark">🔥</div><span>КОТЁЛ</span></div>
-        <button class="icon-btn" id="btnMenu" aria-label="Меню" type="button">☰</button>
+        <div class="brand"><div class="brand-ico">🔥</div><span>КОТЁЛ</span></div>
+        <div class="ver-pill" id="verPill">4.5.0-beta</div>
+        <div class="top-right">
+          <div class="wifi-chip" title="WiFi"><span aria-hidden="true">📶</span><span id="wifiRssiTop">--</span></div>
+          <button class="icon-btn" id="btnMenu" type="button" aria-label="Меню">⋮</button>
+        </div>
       </header>
 
-      <div class="stack">
-        <div class="status-hero" id="statusHero" data-tone="ok">
-          <div class="status-dot" id="statusDot"></div>
-          <div>
-            <h1 class="status-title" id="statusTitle">Загрузка…</h1>
-            <p class="status-sub" id="statusSub">подключение</p>
-          </div>
+      <div class="summary-row">
+        <div class="sum-card" id="sumStatus">
+          <div class="sum-ico ok" id="sumStatusIco">🛡️</div>
+          <div class="sum-title" id="sumStatusTitle">РАБОТАЕТ</div>
+          <div class="sum-sub" id="sumStatusSub">Котёл в норме</div>
         </div>
-
-        <div class="desktop-2">
-          <div class="card" id="supplyCard">
-            <div class="row-between">
-              <div class="label">Подача</div>
-              <span class="trend" id="supplyTrend"></span>
-            </div>
-            <div style="margin-top:8px">
-              <span class="temp-big" id="supplyTemp">--</span><span class="temp-unit" id="supplyUnit">°C</span>
-            </div>
-            <div class="muted" style="margin-top:8px">Уставка <b id="setpointLabel">--</b> °C</div>
-            <div class="gauge" aria-hidden="true"><i id="supplyGauge"></i></div>
-            <div class="gauge-meta"><span id="gaugeMin">55</span><span id="gaugeMax">70 °C</span></div>
-          </div>
-
-          <div class="card" id="homeCard" style="margin-top:10px">
-            <div class="row-between">
-              <div class="label">Дом</div>
-              <span class="chip" id="homeOnlineChip">ОНЛАЙН</span>
-            </div>
-            <div style="margin-top:8px">
-              <span class="temp-big" id="homeTemp">--</span><span class="temp-unit" id="homeUnit">°C</span>
-              <span class="trend" id="homeTrend"></span>
-            </div>
-            <div class="row" style="margin-top:10px">
-              <span class="chip blue" id="homeModeChip">Комфорт</span>
-              <span class="muted">Цель <b id="homeTarget">--</b> °C</span>
-            </div>
-          </div>
+        <div class="sum-card" id="sumActivity">
+          <div class="sum-ico warn" id="sumActIco">🔥</div>
+          <div class="sum-title" id="sumActTitle">НАГРЕВ</div>
+          <div class="sum-sub" id="sumActSub">Идёт нагрев</div>
         </div>
-
-        <div class="grid-4" style="margin-top:10px">
-          <div class="card mini-temp">
-            <div class="label">Обратка</div>
-            <div style="margin-top:6px"><span class="temp-big" id="returnTemp">--</span><span class="temp-unit" id="returnUnit">°C</span><span class="trend" id="returnTrend"></span></div>
-          </div>
-          <div class="card mini-temp">
-            <div class="label">Котельная</div>
-            <div style="margin-top:6px"><span class="temp-big" id="boilerTemp">--</span><span class="temp-unit" id="boilerUnit">°C</span><span class="trend" id="boilerTrend"></span></div>
-          </div>
-          <div class="card mini-temp">
-            <div class="label">Улица</div>
-            <div style="margin-top:6px"><span class="temp-big" id="outdoorTemp">--</span><span class="temp-unit" id="outdoorUnit">°C</span><span class="trend" id="outdoorTrend"></span></div>
-          </div>
-          <div class="card mini-temp">
-            <div class="label">Дымоход</div>
-            <div style="margin-top:6px"><span class="temp-big" id="flueTemp">--</span><span class="temp-unit" id="flueUnit">°C</span><span class="trend" id="flueTrend"></span></div>
-          </div>
+        <div class="sum-card" id="sumUptime">
+          <div class="sum-ico info">⏱️</div>
+          <div class="sum-title">АПТАЙМ</div>
+          <div class="sum-sub" id="sumUptimeVal">--:--:--</div>
         </div>
+      </div>
 
-        <div class="desktop-2eq" style="margin-top:10px">
-          <div class="card">
-            <div class="label">Режим</div>
-            <div style="margin-top:6px; font-size:1.25rem; font-weight:800" id="modeTitle">Авто</div>
-            <div class="muted" id="modeHint">Поддержание температуры подачи</div>
-            <div class="seg" role="tablist">
-              <button type="button" data-mode="0" class="mode-btn active">Авто</button>
-              <button type="button" data-mode="1" class="mode-btn">Комфорт</button>
-              <button type="button" data-mode="2" class="mode-btn">Нейро</button>
-            </div>
-          </div>
-
-          <div class="card" style="margin-top:10px">
-            <div class="row-between">
-              <div>
-                <div class="label">Система</div>
-                <div style="margin-top:6px; font-size:1.15rem; font-weight:800" id="systemLabel">ВКЛЮЧЕНА</div>
-              </div>
-              <label class="switch" title="Система">
-                <input type="checkbox" id="systemEnabled" />
-                <span></span>
-              </label>
-            </div>
-          </div>
+      <div class="home-grid-primary">
+        <div class="card" id="supplyCard">
+          <div class="label">Подача</div>
+          <div class="temp-big"><span id="supplyTemp">--</span><span class="temp-unit" id="supplyUnit">°C</span></div>
+          <div class="setpoint-line">Уставка: <b id="setpointLabel">--</b>°C</div>
+          <div class="gauge"><i id="supplyGauge"></i></div>
+          <div class="gauge-meta"><span id="gaugeMin">55</span><span id="gaugeMax">70 °C</span></div>
         </div>
-
-        <div class="desktop-2eq" style="margin-top:10px">
-          <div class="card">
-            <div class="row-between">
-              <div class="row">
-                <div class="equip-icon fan-spin" id="fanIcon">🌀</div>
-                <div>
-                  <div class="label">Вентилятор</div>
-                  <div style="font-weight:800" id="fanLabel">Выключен</div>
-                  <div class="muted" id="fanPower">Мощность: --</div>
-                </div>
-              </div>
-              <div class="ring" id="fanRing" style="--p:0"></div>
-            </div>
-          </div>
-          <div class="card" style="margin-top:10px">
-            <div class="row">
-              <div class="equip-icon" id="pumpIcon">💧</div>
-              <div>
-                <div class="label">Насос</div>
-                <div style="font-weight:800" id="pumpLabel">Выключен</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="card" style="margin-top:10px; border-color: rgba(255,138,61,.28)">
+        <div class="card" id="homeCard">
           <div class="row-between">
-            <div>
-              <div class="label" style="color: var(--warn)">Подброс топлива</div>
-              <div class="muted" id="coalHint">Запуск цикла подброса</div>
-              <div style="font-weight:800; margin-top:4px" id="coalTimer" class="hidden">Осталось 00:00</div>
-            </div>
-            <button class="btn primary" type="button" id="coalBtn">Запустить</button>
+            <div class="label">Дом</div>
+            <span class="chip" id="homeOnlineChip">ОНЛАЙН</span>
           </div>
-        </div>
-
-        <div class="alert" id="lowReturnAlert">
-          <div>⚠️</div>
-          <div>
-            <div style="font-weight:800">Низкая температура обратки</div>
-            <div class="muted">Температура обратки ниже рекомендуемой.</div>
+          <div class="temp-big"><span id="homeTemp">--</span><span class="temp-unit" id="homeUnit">°C</span></div>
+          <div class="setpoint-line">Уставка: <b id="homeTarget">--</b>°C</div>
+          <div class="row" style="margin-top:10px">
+            <span class="chip blue" id="homeModeChip">🏠 Комфорт</span>
           </div>
         </div>
       </div>
+
+      <div class="home-grid-sec">
+        <div class="card mini">
+          <div class="label">Обратка</div>
+          <div class="temp-big"><span id="returnTemp">--</span><span class="temp-unit" id="returnUnit">°C</span></div>
+          <div class="trend-line" id="returnTrend"></div>
+        </div>
+        <div class="card mini">
+          <div class="label">Котельная</div>
+          <div class="temp-big"><span id="boilerTemp">--</span><span class="temp-unit" id="boilerUnit">°C</span></div>
+          <div class="trend-line" id="boilerTrend"></div>
+        </div>
+        <div class="card mini">
+          <div class="label">Улица</div>
+          <div class="temp-big"><span id="outdoorTemp">--</span><span class="temp-unit" id="outdoorUnit">°C</span></div>
+          <div class="trend-line" id="outdoorTrend"></div>
+        </div>
+        <div class="card mini">
+          <div class="label">Дымоход</div>
+          <div class="temp-big"><span id="flueTemp">--</span><span class="temp-unit" id="flueUnit">°C</span></div>
+          <div class="trend-line up" id="flueTrend"></div>
+        </div>
+      </div>
+
+      <div class="home-grid-2">
+        <div class="card mode-card" id="modeCard" title="Сменить режим">
+          <div class="label">Режим работы</div>
+          <div class="mode-name" id="modeTitle">Авто</div>
+          <div class="muted" id="modeHint" style="margin-top:4px">Поддержание температуры подачи</div>
+        </div>
+        <div class="card">
+          <div class="row-between">
+            <div>
+              <div class="label">Система</div>
+              <div class="sys-state" id="systemLabel">ВКЛЮЧЕНА</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="systemEnabled" />
+              <span></span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div class="home-grid-2">
+        <div class="card">
+          <div class="equip">
+            <div class="equip-left">
+              <div class="equip-ico" id="fanIcon"><span class="fan-spin" id="fanSpin">🌀</span></div>
+              <div>
+                <div class="label">Вентилятор</div>
+                <div class="equip-state" id="fanLabel">Выключен</div>
+                <div class="muted" id="fanPower">Мощность: --</div>
+              </div>
+            </div>
+            <div class="ring" id="fanRing" style="--p:0"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="equip-left">
+            <div class="equip-ico" id="pumpIcon">💧</div>
+            <div>
+              <div class="label">Насос</div>
+              <div class="equip-state" id="pumpLabel">Выключен</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card coal-card">
+        <div class="coal-row">
+          <div>
+            <div class="label" style="color:var(--warn)">Подброс угля</div>
+            <div class="muted" id="coalHint" style="margin-top:4px">Запуск цикла подброса</div>
+            <div class="coal-timer hidden" id="coalTimer">02:45</div>
+          </div>
+          <button class="btn primary" type="button" id="coalBtn">▶ Запустить</button>
+        </div>
+      </div>
+
+      <div class="alert warn-only" id="lowReturnAlert">
+        <div>⚠️</div>
+        <div>
+          <div style="font-weight:800">Низкая обратка</div>
+          <div class="muted">Температура обратки ниже нормы! Рекомендуется следить за температурой.</div>
+        </div>
+      </div>
+
+      <div class="tech-row">
+        <div class="tech-item"><div class="tech-dot" id="dotMqtt"></div><div><div class="tech-k">MQTT</div><div class="tech-v" id="techMqtt">--</div></div></div>
+        <div class="tech-item"><div class="tech-dot" id="dotWifi"></div><div><div class="tech-k">WiFi</div><div class="tech-v" id="techWifi">--</div></div></div>
+        <div class="tech-item"><div class="tech-dot" id="dotSensors"></div><div><div class="tech-k">Датчики</div><div class="tech-v" id="techSensors">--</div></div></div>
+        <div class="tech-item"><div class="tech-dot" id="dotSafety"></div><div><div class="tech-k">Безопасность</div><div class="tech-v" id="techSafety">--</div></div></div>
+      </div>
     </section>
 
-    <!-- ===== MENU HUB ===== -->
     <section id="pageMenu" class="page">
-      <header class="topbar">
-        <div class="brand"><div class="brand-mark">⚙️</div><span>МЕНЮ</span></div>
+      <header class="topbar" style="grid-template-columns:1fr auto">
+        <div class="brand"><div class="brand-ico">⚙️</div><span>НАСТРОЙКИ</span></div>
         <button class="icon-btn" type="button" onclick="showHome()">🏠</button>
       </header>
       <div class="section-title">Управление</div>
@@ -502,13 +569,12 @@
       <div class="section-title">Аналитика</div>
       <div class="menu-list">
         <button class="menu-item" type="button" onclick="openSettings('log')"><span class="left"><span class="menu-ico">📋</span><span>Журнал</span></span><span>›</span></button>
-        <button class="menu-item" type="button" onclick="openSettings('ml')"><span class="left"><span class="menu-ico">🤖</span><span>ML / гипотезы</span></span><span>›</span></button>
         <button class="menu-item" type="button" onclick="openSettings('events')"><span class="left"><span class="menu-ico">📝</span><span>События</span></span><span>›</span></button>
+        <button class="menu-item" type="button" onclick="openSettings('ml')"><span class="left"><span class="menu-ico">🤖</span><span>ML / гипотезы</span></span><span>›</span></button>
       </div>
     </section>
 
-    <!-- ===== SETTINGS PAGES ===== -->
-    <section id="settingsHost" class="hidden">
+<section id="settingsHost" class="hidden">
       <div id="settingsAuto" class="settings-page">
         <div class="back-row"><button class="btn" type="button" onclick="closeSettings()">← Назад</button><strong>Режим Авто</strong></div>
         <div class="settings-group">
@@ -707,11 +773,24 @@
     </section>
   </div>
 
+  
+  </div>
+
   <nav class="bottom-nav" aria-label="Навигация">
     <button type="button" class="active" id="navHome" onclick="showHome()"><span class="nav-ico">🏠</span>Главная</button>
     <button type="button" id="navMenu" onclick="showMenu()"><span class="nav-ico">⚙️</span>Настройки</button>
+    <button type="button" id="navLog" onclick="openSettings('log')"><span class="nav-ico">📋</span>Журнал</button>
+    <button type="button" id="navEvents" onclick="openSettings('events')"><span class="nav-ico">📝</span>События</button>
     <button type="button" id="navSystem" onclick="openSettings('system')"><span class="nav-ico">ℹ️</span>Система</button>
   </nav>
+
+  <div class="sheet-bg" id="modeSheetBg"></div>
+  <div class="sheet" id="modeSheet" role="dialog" aria-label="Режим">
+    <h3>Режим работы</h3>
+    <button class="opt" type="button" data-mode="0"><b>Авто</b><span>Поддержание температуры подачи</span></button>
+    <button class="opt" type="button" data-mode="1"><b>Комфорт</b><span>Ориентир по температуре дома</span></button>
+    <button class="opt" type="button" data-mode="2"><b>Нейро</b><span>Наблюдение и анализ</span></button>
+  </div>
 
   <div class="drawer-backdrop" id="drawerBackdrop"></div>
   <aside class="drawer" id="drawer" aria-hidden="true">
@@ -736,6 +815,7 @@
   <div class="toast" id="toast"></div>
 
   <script>
+
     const DEMO = new URLSearchParams(location.search).has('demo');
     let lastStatus = null;
     let pollTimer = null;
@@ -865,24 +945,82 @@
       return dict[s] || dict[s.toUpperCase()] || (s ? s : '');
     }
 
+    
+    function fmtUptime(sec) {
+      sec = Math.max(0, Number(sec) || 0);
+      const h = String(Math.floor(sec / 3600)).padStart(2, '0');
+      const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
+      const s = String(sec % 60).padStart(2, '0');
+      return h + ':' + m + ':' + s;
+    }
+
+    function setTrendText(el, t) {
+      if (!el) return;
+      if (t === 1) { el.textContent = '↑ растёт'; el.className = 'trend-line up'; }
+      else if (t === -1) { el.textContent = '↓ падает'; el.className = 'trend-line down'; }
+      else if (t === 0) { el.textContent = '— без изм.'; el.className = 'trend-line flat'; }
+      else { el.textContent = ''; el.className = 'trend-line'; }
+    }
+
+    function setDot(el, tone) {
+      if (!el) return;
+      el.className = 'tech-dot' + (tone && tone !== 'ok' ? (' ' + tone) : '');
+    }
+
     function applyStatus(d) {
       lastStatus = d;
       const hs = humanState(d);
-      const hero = $('statusHero');
-      hero.dataset.tone = hs.tone;
-      $('statusTitle').textContent = hs.title;
-      $('statusSub').textContent = hs.sub;
+      const mode = Number(d.workMode || 0);
+      const online = d.homeTempSensorLWTOnline !== false;
+
+      // summary cards
+      const ico = $('sumStatusIco');
+      ico.className = 'sum-ico ' + hs.tone;
+      ico.textContent = hs.tone === 'bad' ? '⛔' : hs.tone === 'warn' ? '⚠️' : hs.tone === 'idle' ? '⚪' : '🛡️';
+      $('sumStatusTitle').textContent = hs.title.replace(/^КОТЁЛ\s+/, '').replace(/^НЕТ\s+/, 'НЕТ ');
+      // shorten titles for small cards
+      let stTitle = 'РАБОТАЕТ';
+      let stSub = 'Котёл в норме';
+      if (offline) { stTitle = 'НЕТ СВЯЗИ'; stSub = 'Нет ответа'; ico.className = 'sum-ico bad'; ico.textContent = '⛔'; }
+      else if (d.safetyTrip) { stTitle = 'АВАРИЯ'; stSub = d.safetyReason || 'Safety'; ico.className = 'sum-ico bad'; ico.textContent = '⛔'; }
+      else if (d.systemEnabled === false) { stTitle = 'ОСТАНОВЛЕН'; stSub = 'Система выкл.'; ico.className = 'sum-ico idle'; ico.textContent = '⚪'; }
+      else if (d.coalFeeding) { stTitle = 'ПОДБРОС'; stSub = 'Цикл топлива'; ico.className = 'sum-ico warn'; ico.textContent = '🔥'; }
+      else if (d.supplyTemp != null && d.supplyTemp >= 77) { stTitle = 'ПЕРЕГРЕВ'; stSub = 'Безопасность'; ico.className = 'sum-ico bad'; ico.textContent = '⛔'; }
+      else if (String(d.state||'').toUpperCase() === 'IDLE' || (!d.fan && !d.pump && d.systemEnabled)) {
+        if (String(d.state||'').toUpperCase() === 'IDLE') { stTitle = 'ОЖИДАНИЕ'; stSub = 'Температура достигнута'; ico.className = 'sum-ico info'; ico.textContent = '🛡️'; }
+        else { stTitle = 'РАБОТАЕТ'; stSub = 'Котёл в норме'; }
+      }
+      $('sumStatusTitle').textContent = stTitle;
+      $('sumStatusSub').textContent = stSub;
+
+      // activity
+      const actIco = $('sumActIco');
+      let actTitle = 'ОЖИДАНИЕ';
+      let actSub = 'Нет нагрева';
+      actIco.className = 'sum-ico info';
+      actIco.textContent = '💤';
+      if (d.coalFeeding) { actTitle = 'ПОДБРОС'; actSub = 'Загрузка топлива'; actIco.className = 'sum-ico warn'; actIco.textContent = '🔥'; }
+      else if (d.fan || String(d.state||'').toUpperCase() === 'HEATING') { actTitle = 'НАГРЕВ'; actSub = 'Идёт нагрев'; actIco.className = 'sum-ico warn'; actIco.textContent = '🔥'; }
+      else if (d.pump) { actTitle = 'НАСОС'; actSub = 'Циркуляция'; actIco.className = 'sum-ico info'; actIco.textContent = '💧'; }
+      else if (d.systemEnabled === false) { actTitle = 'СТОП'; actSub = 'Система выкл.'; actIco.className = 'sum-ico idle'; actIco.textContent = '⚪'; }
+      $('sumActTitle').textContent = actTitle;
+      $('sumActSub').textContent = actSub;
+      $('sumUptimeVal').textContent = fmtUptime(d.uptime);
+
+      // version / wifi top
+      if (d.firmwareVersion || d.version) $('verPill').textContent = d.firmwareVersion || d.version;
+      const rssi = d.wifiRSSI;
+      $('wifiRssiTop').textContent = (rssi != null && rssi !== 0) ? (rssi + ' dBm') : '--';
 
       fmtTemp(d.supplyTemp, $('supplyTemp'), $('supplyUnit'));
       fmtTemp(d.returnTemp, $('returnTemp'), $('returnUnit'));
       fmtTemp(d.boilerTemp, $('boilerTemp'), $('boilerUnit'));
       fmtTemp(d.outdoorTemp, $('outdoorTemp'), $('outdoorUnit'));
       fmtTemp(d.flueTemp, $('flueTemp'), $('flueUnit'));
-      setTrend($('supplyTrend'), d.supplyTrend);
-      setTrend($('returnTrend'), d.returnTrend);
-      setTrend($('boilerTrend'), d.boilerTrend);
-      setTrend($('outdoorTrend'), d.outdoorTrend);
-      setTrend($('homeTrend'), d.homeTrend);
+      setTrendText($('returnTrend'), d.returnTrend);
+      setTrendText($('boilerTrend'), d.boilerTrend);
+      setTrendText($('outdoorTrend'), d.outdoorTrend);
+      setTrendText($('flueTrend'), d.flueTrend != null ? d.flueTrend : (d.supplyTrend));
 
       const sp = d.setpoint != null ? Number(d.setpoint) : null;
       $('setpointLabel').textContent = sp != null ? sp.toFixed(0) : '--';
@@ -895,7 +1033,6 @@
         $('supplyGauge').style.width = p + '%';
       }
 
-      const online = d.homeTempSensorLWTOnline !== false;
       const chip = $('homeOnlineChip');
       if (!online) {
         $('homeTemp').textContent = 'OFFLINE';
@@ -909,37 +1046,34 @@
       }
       const target = d.targetHomeTemp != null ? d.targetHomeTemp : d.comfortRoom;
       $('homeTarget').textContent = target != null ? Number(target).toFixed(1) : '--';
-      const mode = Number(d.workMode || 0);
       $('homeModeChip').style.display = mode === 1 ? 'inline-flex' : 'none';
       $('homeCard').style.outline = mode === 1 ? '1px solid rgba(77,163,255,.35)' : 'none';
 
       $('modeTitle').textContent = MODE_NAME[mode] || 'Авто';
       $('modeHint').textContent = MODE_HINT[mode] || '';
-      document.querySelectorAll('.mode-btn').forEach(btn => {
-        const m = Number(btn.dataset.mode);
-        btn.classList.toggle('active', m === mode);
-        if (m === 1 && !online && mode !== 1) btn.disabled = true;
-        else btn.disabled = false;
+      document.querySelectorAll('#modeSheet .opt').forEach(btn => {
+        btn.classList.toggle('active', Number(btn.dataset.mode) === mode);
       });
 
       const en = !!d.systemEnabled;
       const sys = $('systemEnabled');
       if (sys.checked !== en) sys.checked = en;
       $('systemLabel').textContent = en ? 'ВКЛЮЧЕНА' : 'ВЫКЛЮЧЕНА';
-      $('systemLabel').style.color = en ? 'var(--ok)' : 'var(--muted)';
+      $('systemLabel').className = 'sys-state' + (en ? '' : ' off');
 
       const fanOn = !!d.fan;
       $('fanLabel').textContent = fanOn ? 'Включен' : 'Выключен';
-      $('fanLabel').style.color = fanOn ? 'var(--ok)' : 'var(--muted)';
+      $('fanLabel').className = 'equip-state' + (fanOn ? ' on' : '');
       $('fanIcon').classList.toggle('on', fanOn);
-      $('fanIcon').classList.toggle('fan-spin', fanOn);
+      $('fanSpin').classList.toggle('on', fanOn);
       const pct = d.fanPowerPct != null ? Number(d.fanPowerPct) : (fanOn ? 100 : 0);
       $('fanPower').textContent = 'Мощность: ' + pct + '%';
       $('fanRing').style.setProperty('--p', String(pct));
+      $('fanRing').title = pct + '%';
 
       const pumpOn = !!d.pump;
       $('pumpLabel').textContent = pumpOn ? 'Включен' : 'Выключен';
-      $('pumpLabel').style.color = pumpOn ? 'var(--ok)' : 'var(--muted)';
+      $('pumpLabel').className = 'equip-state' + (pumpOn ? ' on' : '');
       $('pumpIcon').classList.toggle('on', pumpOn);
 
       const coal = !!d.coalFeeding;
@@ -948,22 +1082,39 @@
         const sec = d.coalFeedingRemaining || 0;
         const mm = String(Math.floor(sec / 60)).padStart(2, '0');
         const ss = String(sec % 60).padStart(2, '0');
-        $('coalTimer').textContent = 'Осталось ' + mm + ':' + ss;
-        $('coalHint').textContent = 'Цикл активен';
+        $('coalTimer').textContent = mm + ':' + ss;
+        $('coalHint').textContent = 'До завершения';
         $('coalBtn').textContent = 'Активен';
         $('coalBtn').disabled = true;
       } else {
         $('coalHint').textContent = 'Запуск цикла подброса';
-        $('coalBtn').textContent = 'Запустить';
+        $('coalBtn').textContent = '▶ Запустить';
         $('coalBtn').disabled = false;
       }
 
       const low = !!d.lowReturnTemp && !d.safetyTrip;
       $('lowReturnAlert').classList.toggle('show', low);
-      $('lowReturnAlert').classList.toggle('bad', false);
+
+      // tech footer
+      const mqtt = d.mqttStatus || '--';
+      $('techMqtt').textContent = mqtt;
+      setDot($('dotMqtt'), /подключ/i.test(String(mqtt)) ? 'ok' : (/выключ/i.test(String(mqtt)) ? 'idle' : 'warn'));
+      const wr = (rssi != null && rssi !== 0) ? (rssi + ' dBm') : (d.wifiStatus || '--');
+      $('techWifi').textContent = wr;
+      setDot($('dotWifi'), (rssi != null && rssi > -80) ? 'ok' : (rssi != null ? 'warn' : 'idle'));
+      const sensOn = d.sensorPowerOn !== false;
+      $('techSensors').textContent = sensOn ? 'Питание вкл.' : 'Питание выкл.';
+      setDot($('dotSensors'), sensOn ? 'ok' : 'warn');
+      if (d.safetyTrip) {
+        $('techSafety').textContent = 'Авария';
+        setDot($('dotSafety'), 'bad');
+      } else {
+        $('techSafety').textContent = 'Норма';
+        setDot($('dotSafety'), 'ok');
+      }
     }
 
-    async function updateData() {
+async function updateData() {
       try {
         const d = await api('/api/status');
         offline = false;
@@ -1037,9 +1188,8 @@
       $('pageMenu').classList.remove('active');
       $('settingsHost').classList.add('hidden');
       document.querySelectorAll('.settings-page').forEach(p => p.classList.remove('active'));
+      ['navHome','navMenu','navLog','navEvents','navSystem'].forEach(id => $(id).classList.remove('active'));
       $('navHome').classList.add('active');
-      $('navMenu').classList.remove('active');
-      $('navSystem').classList.remove('active');
       closeDrawer();
     }
 
@@ -1048,9 +1198,8 @@
       $('pageMenu').classList.add('active');
       $('settingsHost').classList.add('hidden');
       document.querySelectorAll('.settings-page').forEach(p => p.classList.remove('active'));
-      $('navHome').classList.remove('active');
+      ['navHome','navMenu','navLog','navEvents','navSystem'].forEach(id => $(id).classList.remove('active'));
       $('navMenu').classList.add('active');
-      $('navSystem').classList.remove('active');
       closeDrawer();
     }
 
@@ -1063,7 +1212,11 @@
       const page = $(id);
       if (page) page.classList.add('active');
       closeDrawer();
-      if (name === 'system') { $('navSystem').classList.add('active'); $('navHome').classList.remove('active'); $('navMenu').classList.remove('active'); }
+      ['navHome','navMenu','navLog','navEvents','navSystem'].forEach(id => $(id).classList.remove('active'));
+      if (name === 'system') $('navSystem').classList.add('active');
+      else if (name === 'log') $('navLog').classList.add('active');
+      else if (name === 'events') $('navEvents').classList.add('active');
+      else $('navMenu').classList.add('active');
       loadSettings(name);
     }
 
@@ -1335,18 +1488,31 @@
       loadSettings('events');
     }
 
-    document.querySelectorAll('.mode-btn').forEach(btn => {
-      btn.addEventListener('click', () => setMode(Number(btn.dataset.mode)));
-    });
     $('systemEnabled').addEventListener('change', toggleSystem);
     $('coalBtn').addEventListener('click', startCoal);
     $('btnMenu').addEventListener('click', openDrawer);
     $('drawerClose').addEventListener('click', closeDrawer);
     $('drawerBackdrop').addEventListener('click', closeDrawer);
+    $('modeCard').addEventListener('click', () => {
+      $('modeSheet').classList.add('open');
+      $('modeSheetBg').classList.add('open');
+    });
+    $('modeSheetBg').addEventListener('click', () => {
+      $('modeSheet').classList.remove('open');
+      $('modeSheetBg').classList.remove('open');
+    });
+    document.querySelectorAll('#modeSheet .opt').forEach(btn => {
+      btn.addEventListener('click', () => {
+        setMode(Number(btn.dataset.mode));
+        $('modeSheet').classList.remove('open');
+        $('modeSheetBg').classList.remove('open');
+      });
+    });
 
     if (DEMO) toast('Demo-режим (?demo=1)');
     updateData();
     pollTimer = setInterval(updateData, 3000);
+  
   </script>
 </body>
 </html>
