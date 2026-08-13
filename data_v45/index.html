@@ -83,12 +83,24 @@
       flex-direction: column;
       flex: 1 1 auto;
       min-height: 0;
-      height: auto;
+      height: 100%;
       max-height: 100%;
       gap: 4px;
       overflow: hidden;
       position: relative;
       padding-bottom: 0;
+      justify-content: flex-start;
+    }
+    @media (max-width: 899px) {
+      #pageHome.page.active {
+        zoom: 0.92;
+      }
+    }
+    @media (max-width: 899px) and (max-height: 740px) {
+      #pageHome.page.active { zoom: 0.86; }
+    }
+    @media (max-width: 899px) and (max-height: 680px) {
+      #pageHome.page.active { zoom: 0.80; }
     }
     #pageHome > .topbar,
     #pageHome > .summary-row,
