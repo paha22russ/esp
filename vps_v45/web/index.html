@@ -88,19 +88,17 @@
       gap: 4px;
       overflow: hidden;
       position: relative;
-      padding-bottom: 0;
+      padding-bottom: 36px;
       justify-content: flex-start;
     }
     @media (max-width: 899px) {
-      #pageHome.page.active {
-        zoom: 0.92;
-      }
+      #pageHome.page.active { zoom: 0.90; }
     }
     @media (max-width: 899px) and (max-height: 740px) {
-      #pageHome.page.active { zoom: 0.86; }
+      #pageHome.page.active { zoom: 0.84; }
     }
     @media (max-width: 899px) and (max-height: 680px) {
-      #pageHome.page.active { zoom: 0.80; }
+      #pageHome.page.active { zoom: 0.78; }
     }
     #pageHome > .topbar,
     #pageHome > .summary-row,
@@ -108,9 +106,32 @@
     #pageHome > .home-grid-sec,
     #pageHome > .home-grid-2,
     #pageHome > .coal-card,
-    #pageHome > .alert,
-    #pageHome > .tech-row { margin: 0 !important; flex-shrink: 0; }
-    #pageHome > .tech-row { margin-top: 2px !important; }
+    #pageHome > .alert { margin: 0 !important; flex-shrink: 0; }
+
+    /* Always visible above bottom nav on mobile */
+    .tech-row {
+      position: fixed;
+      left: 50%;
+      transform: translateX(-50%);
+      bottom: calc(var(--nav-h) + var(--safe-b));
+      width: min(430px, 100%);
+      padding: 0 8px 6px;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 4px;
+      z-index: 45;
+      background: linear-gradient(180deg, transparent, var(--bg) 30%);
+      box-sizing: border-box;
+    }
+    @media (min-width: 900px) {
+      .tech-row {
+        position: static;
+        transform: none;
+        width: auto;
+        padding: 0;
+        background: none;
+      }
+    }
 
     .sum-ico { display: none; }
     .sum-card { padding: 6px 6px 7px; }
@@ -337,16 +358,11 @@
     .alert .muted { font-size: .65rem; }
 
     /* Tech footer — one row of 4 on mobile */
-    .tech-row {
-      display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px;
-      flex-shrink: 0;
-      height: 32px;
-    }
     .tech-item {
-      background: rgba(255,255,255,.03); border: 1px solid var(--line);
-      border-radius: 8px; padding: 4px 5px;
+      background: rgba(22,27,36,.95); border: 1px solid var(--line);
+      border-radius: 8px; padding: 5px 5px;
       display: flex; flex-direction: row; gap: 4px; align-items: center;
-      min-width: 0; height: 100%;
+      min-width: 0; height: 30px;
     }
     .tech-dot {
       width: 6px; height: 6px; border-radius: 50%; margin-top: 0;
