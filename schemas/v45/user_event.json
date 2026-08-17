@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/schemas/v45/user_event.json",
+  "title": "User event ingest v1",
+  "type": "object",
+  "required": ["type", "device_id", "ts", "event", "text"],
+  "properties": {
+    "type": { "const": "user_event" },
+    "device_id": { "type": "string" },
+    "ts": { "type": "integer" },
+    "event": {
+      "enum": [
+        "fuel_added",
+        "boiler_cleaned",
+        "door_opened",
+        "fuel_quality",
+        "boiler_observation",
+        "fuel_finished",
+        "maintenance",
+        "ignition",
+        "other"
+      ]
+    },
+    "text": { "type": "string" },
+    "audio_url": { "type": "string" },
+    "snapshot": { "type": "object", "description": "telemetry sample at event time" }
+  }
+}

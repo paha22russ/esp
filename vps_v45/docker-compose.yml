@@ -1,0 +1,36 @@
+# VPS Germany — публичный UI котла 4.5-beta
+#
+# Домен: esp.pahavpn.cloud-ip.cc → 151.247.208.17
+# На хосте уже есть nginx (VPS Monitor). Caddy на :80 НЕ поднимаем.
+# Схема: nginx (vhost) → static web + reverse_proxy → ingest :8088
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: boiler
+      POSTGRES_USER: boiler
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_now}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    restart: unless-stopped
+    networks: [boiler_net]
+
+  ingest:
+    build: ./ingest
+    environment:
+      DATABASE_URL: postgres://boiler:${POSTGRES_PASSWORD:-change_me_now}@db:5432/boiler
+      INGEST_TOKEN: ${INGEST_TOKEN:-dev-token-change-me}
+      CORS_ORIGIN: "*"
+    ports:
+      - "127.0.0.1:8088:8080"
+    depends_on: [db]
+    restart: unless-stopped
+    networks: [boiler_net]
+
+networks:
+  boiler_net:
+
+volumes:
+  pgdata:

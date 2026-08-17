@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/schemas/v45/telemetry.sample.json",
+  "title": "Boiler telemetry sample v1",
+  "type": "object",
+  "required": ["schema", "fw", "ts", "mode", "temps", "actuators"],
+  "properties": {
+    "schema": { "const": "1.0" },
+    "fw": { "type": "string" },
+    "channel": { "type": "string" },
+    "ts": { "type": "integer" },
+    "mode": { "enum": ["auto", "comfort", "neuro"] },
+    "state": { "type": "string" },
+    "system_enabled": { "type": "boolean" },
+    "temps": {
+      "type": "object",
+      "properties": {
+        "supply": { "type": ["number", "null"] },
+        "flue": { "type": ["number", "null"] },
+        "return": { "type": ["number", "null"] },
+        "boiler_room": { "type": ["number", "null"] },
+        "outdoor": { "type": ["number", "null"] },
+        "home": { "type": ["number", "null"] }
+      }
+    },
+    "rates_c_per_min": { "type": "object" },
+    "actuators": {
+      "type": "object",
+      "required": ["fan_power_pct", "fan_relay", "pump"],
+      "properties": {
+        "fan_power_pct": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "fan_relay": { "type": "boolean" },
+        "pump": { "type": "boolean" },
+        "sensor_power": { "type": "boolean" }
+      }
+    },
+    "setpoints": { "type": "object" },
+    "sensor_quality": { "type": "object" },
+    "safety_trip": { "type": "boolean" },
+    "safety_reason": { "type": "string" },
+    "fuel_loaded_at_ms": { "type": "integer" }
+  }
+}

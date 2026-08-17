@@ -1,0 +1,1645 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0d12" />
+  <title>Котёл</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0b0d12;
+      --card: #161b24;
+      --card2: #1c2230;
+      --line: rgba(255,255,255,0.07);
+      --text: #f4f6fb;
+      --muted: #8b93a7;
+      --ok: #2fd573;
+      --info: #4da3ff;
+      --warn: #ff8a3d;
+      --bad: #ff4d57;
+      --idle: #7a8499;
+      --radius: 14px;
+      --safe-b: env(safe-area-inset-bottom, 0px);
+      --safe-t: env(safe-area-inset-top, 0px);
+      --nav-h: 58px;
+      --gap: 6px;
+      --pad: 8px;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      margin: 0;
+      font-family: Manrope, system-ui, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(1000px 500px at 0% -5%, #1a2740 0%, transparent 55%),
+        radial-gradient(800px 420px at 110% 0%, #2a170e 0%, transparent 45%),
+        var(--bg);
+      -webkit-tap-highlight-color: transparent;
+    }
+    button, input, select { font: inherit; color: inherit; }
+    .app {
+      width: min(430px, 100%);
+      margin: 0 auto;
+      height: 100dvh;
+      max-height: 100dvh;
+      padding: calc(4px + var(--safe-t)) 8px 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      padding-bottom: calc(var(--nav-h) + var(--safe-b));
+    }
+    @media (min-width: 900px) {
+      html, body { overflow: auto; }
+      .app {
+        width: min(980px, 100%);
+        height: auto;
+        max-height: none;
+        min-height: 100dvh;
+        padding: 16px 16px 28px;
+        overflow: visible;
+      }
+      .bottom-nav { display: none !important; }
+      .home-grid-primary { grid-template-columns: 1fr 1fr !important; }
+      .home-grid-sec { grid-template-columns: repeat(4, 1fr) !important; }
+      .home-grid-2 { grid-template-columns: 1fr 1fr !important; }
+      .tech-row { grid-template-columns: repeat(4, 1fr) !important; }
+      #pageHome { height: auto !important; overflow: visible !important; gap: 10px !important; }
+    }
+
+    .conn-banner {
+      display: none; margin: 0 0 6px; padding: 7px 10px; border-radius: 10px;
+      background: rgba(255,77,87,.12); border: 1px solid rgba(255,77,87,.35);
+      color: #ffb4b8; font-size: .78rem; font-weight: 700; flex-shrink: 0;
+    }
+    .conn-banner.show { display: block; }
+
+    /* Home fills viewport above bottom nav */
+    #pageHome.page.active {
+      display: flex;
+      flex-direction: column;
+      flex: 1 1 auto;
+      min-height: 0;
+      height: 100%;
+      max-height: 100%;
+      gap: 4px;
+      overflow: hidden;
+      position: relative;
+      padding-bottom: 36px;
+      justify-content: flex-start;
+    }
+    @media (max-width: 899px) {
+      #pageHome.page.active { zoom: 0.90; }
+    }
+    @media (max-width: 899px) and (max-height: 740px) {
+      #pageHome.page.active { zoom: 0.84; }
+    }
+    @media (max-width: 899px) and (max-height: 680px) {
+      #pageHome.page.active { zoom: 0.78; }
+    }
+    #pageHome > .topbar,
+    #pageHome > .summary-row,
+    #pageHome > .home-grid-primary,
+    #pageHome > .home-grid-sec,
+    #pageHome > .home-grid-2,
+    #pageHome > .coal-card,
+    #pageHome > .alert { margin: 0 !important; flex-shrink: 0; }
+
+    /* Always visible above bottom nav on mobile */
+    .tech-row {
+      position: fixed;
+      left: 50%;
+      transform: translateX(-50%);
+      bottom: calc(var(--nav-h) + var(--safe-b));
+      width: min(430px, 100%);
+      padding: 0 8px 6px;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 4px;
+      z-index: 45;
+      background: linear-gradient(180deg, transparent, var(--bg) 30%);
+      box-sizing: border-box;
+    }
+    @media (min-width: 900px) {
+      .tech-row {
+        position: static;
+        transform: none;
+        width: auto;
+        padding: 0;
+        background: none;
+      }
+    }
+
+    .sum-ico { display: none; }
+    .sum-card { padding: 6px 6px 7px; }
+    .home-grid-2 .muted,
+    .home-grid-2 .label + .equip-state + .muted { }
+
+    /* ===== Header (mock) ===== */
+    .topbar {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .brand {
+      display: flex; align-items: center; gap: 6px;
+      font-weight: 800; letter-spacing: .05em; font-size: .95rem;
+    }
+    .brand-ico {
+      width: 28px; height: 28px; border-radius: 8px;
+      display: grid; place-items: center;
+      background: linear-gradient(145deg, #ff9f55, #e85d04);
+      box-shadow: 0 4px 10px rgba(232,93,4,.3);
+      font-size: .85rem;
+    }
+    .ver-pill {
+      justify-self: center;
+      background: #222836; color: #c9d0e0;
+      border: 1px solid var(--line);
+      border-radius: 999px; padding: 4px 9px;
+      font-size: .62rem; font-weight: 800; letter-spacing: .02em;
+      white-space: nowrap;
+    }
+    .top-right {
+      justify-self: end;
+      display: flex; align-items: center; gap: 4px;
+    }
+    .wifi-chip {
+      display: flex; align-items: center; gap: 3px;
+      color: var(--muted); font-size: .68rem; font-weight: 700;
+    }
+    .icon-btn {
+      width: 34px; height: 34px; border-radius: 10px;
+      border: 1px solid var(--line); background: var(--card);
+      display: grid; place-items: center; cursor: pointer; font-size: 1rem;
+    }
+
+    .card {
+      background: linear-gradient(180deg, var(--card) 0%, #121821 100%);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 6px 8px;
+    }
+    .label {
+      color: var(--muted); font-size: .58rem; font-weight: 800;
+      letter-spacing: .08em; text-transform: uppercase;
+    }
+    .muted { color: var(--muted); font-size: .7rem; }
+
+    /* ===== 3 status summary cards ===== */
+    .summary-row {
+      display: grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--gap);
+      flex-shrink: 0;
+    }
+    .sum-card {
+      background: var(--card); border: 1px solid var(--line);
+      border-radius: 12px; padding: 7px 7px 8px;
+      min-height: 0;
+    }
+    .sum-ico {
+      width: 22px; height: 22px; border-radius: 7px;
+      display: grid; place-items: center; font-size: .75rem; margin-bottom: 4px;
+    }
+    .sum-ico.ok { background: rgba(47,213,115,.15); color: var(--ok); }
+    .sum-ico.info { background: rgba(77,163,255,.15); color: var(--info); }
+    .sum-ico.warn { background: rgba(255,138,61,.15); color: var(--warn); }
+    .sum-ico.bad { background: rgba(255,77,87,.15); color: var(--bad); }
+    .sum-ico.idle { background: rgba(122,132,153,.15); color: var(--idle); }
+    .sum-title { font-size: .62rem; font-weight: 800; line-height: 1.1; }
+    .sum-sub { display: none; margin-top: 2px; color: var(--muted); font-size: .55rem; line-height: 1.2; }
+
+    /* ===== Primary temps ===== */
+    .home-grid-primary {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 5px;
+      flex: 0 0 auto;
+    }
+    .home-grid-primary .card {
+      display: flex; flex-direction: column; justify-content: flex-start;
+      min-height: 0;
+    }
+    .temp-big {
+      font-size: clamp(1.35rem, 6.2vw, 1.75rem);
+      font-weight: 800; letter-spacing: -.03em; line-height: 1; margin-top: 2px;
+    }
+    .temp-unit { font-size: .78rem; color: var(--muted); font-weight: 700; margin-left: 1px; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 3px;
+      padding: 2px 6px; border-radius: 999px; font-size: .58rem; font-weight: 800;
+      background: rgba(47,213,115,.12); color: var(--ok); border: 1px solid rgba(47,213,115,.28);
+    }
+    .chip.off { background: rgba(122,132,153,.12); color: var(--muted); border-color: rgba(122,132,153,.25); }
+    .chip.blue { background: rgba(77,163,255,.12); color: var(--info); border-color: rgba(77,163,255,.28); }
+    .chip.warn { background: rgba(255,138,61,.12); color: var(--warn); border-color: rgba(255,138,61,.3); }
+    .gauge {
+      margin-top: 6px; height: 5px; border-radius: 999px;
+      background: rgba(255,255,255,.06); position: relative; overflow: hidden;
+    }
+    .gauge > i {
+      position: absolute; inset: 0 auto 0 0; width: 0%;
+      background: linear-gradient(90deg, #2fd573, #4da3ff);
+      border-radius: inherit; transition: width .55s ease;
+    }
+    .gauge-meta { display: none; }
+    .setpoint-line { margin-top: 2px; color: var(--muted); font-size: .62rem; }
+    .setpoint-line b { color: var(--text); font-weight: 800; }
+    .mode-hint-el { display: none; }
+
+    /* ===== Secondary 2x2 ===== */
+    .home-grid-sec {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 5px;
+      flex: 0 0 auto;
+    }
+    .home-grid-sec .card {
+      display: flex; flex-direction: column; justify-content: center; min-height: 0; padding: 6px 7px;
+    }
+    .mini .temp-big { font-size: clamp(1.05rem, 4.6vw, 1.2rem); margin-top: 1px; }
+    .trend-line {
+      margin-top: 2px; font-size: .62rem; font-weight: 700; color: var(--muted);
+      min-height: 0; line-height: 1.1;
+    }
+    .trend-line.up { color: var(--warn); }
+    .trend-line.down { color: var(--info); }
+    .trend-line.flat { color: var(--muted); }
+
+    .home-grid-2 {
+      display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap);
+      flex-shrink: 0;
+    }
+
+    /* Mode / System */
+    .mode-card { cursor: pointer; }
+    .mode-name { margin-top: 2px; font-size: .95rem; font-weight: 800; line-height: 1.1; }
+    .switch {
+      position: relative; width: 46px; height: 28px; flex-shrink: 0;
+    }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .switch span {
+      position: absolute; inset: 0; border-radius: 999px; cursor: pointer;
+      background: #3a4254; transition: .2s;
+    }
+    .switch span::before {
+      content: ""; position: absolute; width: 22px; height: 22px; border-radius: 50%;
+      left: 3px; top: 3px; background: #fff; transition: .2s;
+    }
+    .switch input:checked + span { background: var(--ok); }
+    .switch input:checked + span::before { transform: translateX(18px); }
+    .sys-state { margin-top: 2px; font-size: .85rem; font-weight: 800; color: var(--ok); line-height: 1.1; }
+    .sys-state.off { color: var(--muted); }
+
+    /* Equipment */
+    .equip {
+      display: flex; align-items: center; justify-content: space-between; gap: 6px;
+    }
+    .equip-left { display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .equip-ico {
+      width: 30px; height: 30px; border-radius: 9px;
+      display: grid; place-items: center;
+      background: rgba(255,255,255,.04); border: 1px solid var(--line); font-size: .9rem;
+      flex-shrink: 0;
+    }
+    .equip-ico.on { color: var(--ok); background: rgba(47,213,115,.1); border-color: rgba(47,213,115,.28); }
+    .equip-state { font-weight: 800; margin-top: 1px; font-size: .82rem; }
+    .equip-state.on { color: var(--ok); }
+    #fanPower { font-size: .58rem; line-height: 1.1; }
+    .ring {
+      --p: 0;
+      width: 34px; height: 34px; border-radius: 50%;
+      background: conic-gradient(var(--ok) calc(var(--p) * 1%), rgba(255,255,255,.08) 0);
+      display: grid; place-items: center; flex-shrink: 0;
+    }
+    .ring::after {
+      content: ""; width: 22px; height: 22px; border-radius: 50%; background: var(--card);
+    }
+    .fan-spin.on { animation: spin 1.35s linear infinite; display: inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Coal */
+    .coal-card {
+      border-color: rgba(255,138,61,.32);
+      background: linear-gradient(180deg, #24180f 0%, #161b24 100%);
+      flex-shrink: 0;
+      padding: 6px 8px !important;
+    }
+    .coal-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .coal-timer {
+      margin-top: 2px; font-size: 1.05rem; font-weight: 800; color: var(--warn);
+      font-variant-numeric: tabular-nums;
+    }
+    .btn {
+      border: 0; border-radius: 11px; padding: 9px 12px; font-weight: 800; cursor: pointer;
+      background: var(--card2); border: 1px solid var(--line); font-size: .82rem;
+    }
+    .btn.primary {
+      background: linear-gradient(135deg, #ff9f55, #e85d04);
+      border: 0; color: #1a0d05; white-space: nowrap;
+      padding: 8px 11px; font-size: .75rem;
+    }
+    .btn.block { width: 100%; }
+    .btn:disabled { opacity: .55; cursor: not-allowed; }
+
+    /* Alert — overlay style so it doesn't blow layout */
+    .alert {
+      display: none; gap: 8px; align-items: flex-start;
+      border-radius: 12px; padding: 8px 10px;
+      border: 1px solid rgba(255,77,87,.4);
+      background: rgba(255,77,87,.1);
+      flex-shrink: 0;
+    }
+    .alert.show { display: flex; }
+    .alert.warn-only {
+      border-color: rgba(255,138,61,.4);
+      background: rgba(255,138,61,.1);
+    }
+    .alert .muted { font-size: .65rem; }
+
+    /* Tech footer — one row of 4 on mobile */
+    .tech-item {
+      background: rgba(22,27,36,.95); border: 1px solid var(--line);
+      border-radius: 8px; padding: 5px 5px;
+      display: flex; flex-direction: row; gap: 4px; align-items: center;
+      min-width: 0; height: 30px;
+    }
+    .tech-dot {
+      width: 6px; height: 6px; border-radius: 50%; margin-top: 0;
+      background: var(--ok); flex-shrink: 0;
+    }
+    .tech-dot.bad { background: var(--bad); }
+    .tech-dot.warn { background: var(--warn); }
+    .tech-dot.idle { background: var(--idle); }
+    .tech-k { font-size: .52rem; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+    .tech-v {
+      font-size: .62rem; font-weight: 800; margin-top: 0;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+    }
+
+    @media (min-height: 840px) {
+      .sum-sub { display: block; }
+      .mode-hint-el { display: block; }
+      .gauge-meta { display: flex; justify-content: space-between; margin-top: 3px; color: var(--muted); font-size: .58rem; font-weight: 700; }
+      .temp-big { font-size: clamp(1.55rem, 7vw, 2rem); }
+      .card { padding: 8px 9px; }
+      #pageHome.page.active { gap: 6px; }
+    }
+    @media (max-height: 700px) {
+      :root { --nav-h: 52px; }
+      .sum-ico { display: none; }
+      .trend-line { display: none; }
+      .equip-ico { width: 24px; height: 24px; font-size: .75rem; }
+      .ring { width: 26px; height: 26px; }
+      .ring::after { width: 16px; height: 16px; }
+    }
+    @media (max-height: 640px) {
+      .ver-pill { display: none; }
+      .topbar { grid-template-columns: 1fr auto; }
+      .setpoint-line { font-size: .58rem; }
+    }
+
+    /* Mode picker sheet */
+    .sheet-bg {
+      position: fixed; inset: 0; background: rgba(0,0,0,.55);
+      opacity: 0; pointer-events: none; transition: .2s; z-index: 70;
+    }
+    .sheet-bg.open { opacity: 1; pointer-events: auto; }
+    .sheet {
+      position: fixed; left: 50%; bottom: 0; transform: translate(-50%, 110%);
+      width: min(430px, 100%); background: #12161f;
+      border: 1px solid var(--line); border-radius: 22px 22px 0 0;
+      padding: 16px 14px calc(18px + var(--safe-b)); transition: .25s; z-index: 80;
+    }
+    .sheet.open { transform: translate(-50%, 0); }
+    .sheet h3 { margin: 0 0 12px; font-size: 1rem; }
+    .sheet .opt {
+      width: 100%; text-align: left; margin-bottom: 8px;
+      padding: 14px; border-radius: 14px; border: 1px solid var(--line);
+      background: var(--card); cursor: pointer;
+    }
+    .sheet .opt.active { border-color: rgba(77,163,255,.45); background: #1a2436; }
+    .sheet .opt b { display: block; font-size: 1rem; }
+    .sheet .opt span { color: var(--muted); font-size: .82rem; }
+
+    /* Pages / menu / settings */
+    .page { display: none; }
+    .page.active { display: block; }
+    #pageMenu.page.active,
+    #settingsHost:not(.hidden) {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      -webkit-overflow-scrolling: touch;
+      padding-bottom: calc(var(--nav-h) + var(--safe-b) + 12px);
+    }
+    #settingsHost:not(.hidden) { display: block; flex: 1; }
+    .menu-list { display: grid; gap: 8px; }
+    .menu-item {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 16px; border-radius: 16px; background: var(--card);
+      border: 1px solid var(--line); cursor: pointer; text-align: left; width: 100%;
+    }
+    .menu-item .left { display: flex; gap: 12px; align-items: center; }
+    .menu-ico {
+      width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center;
+      background: rgba(255,255,255,.05); border: 1px solid var(--line);
+    }
+    .section-title {
+      margin: 18px 0 8px; color: var(--muted); font-size: .75rem;
+      font-weight: 800; letter-spacing: .08em; text-transform: uppercase;
+    }
+    .settings-page { display: none; }
+    .settings-page.active { display: block; }
+    .back-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .field { margin-bottom: 12px; }
+    .field label { display: block; color: var(--muted); font-size: .8rem; font-weight: 600; margin-bottom: 6px; }
+    .field input, .field select {
+      width: 100%; padding: 12px 14px; border-radius: 12px;
+      border: 1px solid var(--line); background: #10141c;
+    }
+    .settings-group {
+      background: var(--card); border: 1px solid var(--line);
+      border-radius: 16px; padding: 14px; margin-bottom: 12px;
+    }
+    .settings-group h3 { margin: 0 0 12px; font-size: 1rem; }
+    .info-box {
+      padding: 12px; border-radius: 14px; margin-bottom: 12px;
+      background: rgba(77,163,255,.08); border: 1px solid rgba(77,163,255,.2);
+      color: var(--muted); font-size: .9rem;
+    }
+    .check { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+    .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .row-between { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .hidden { display: none !important; }
+
+    /* Bottom nav — 5 items as mock */
+    .bottom-nav {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+      height: calc(var(--nav-h) + var(--safe-b));
+      padding: 4px 4px calc(4px + var(--safe-b));
+      background: rgba(11,13,18,.96); backdrop-filter: blur(14px);
+      border-top: 1px solid var(--line);
+      display: grid; grid-template-columns: repeat(5, 1fr); gap: 0;
+    }
+    .bottom-nav button {
+      border: 0; background: transparent; color: var(--muted);
+      padding: 4px 2px; border-radius: 10px; font-size: .58rem; font-weight: 700;
+      display: grid; gap: 1px; place-items: center; cursor: pointer;
+    }
+    .bottom-nav button.active { color: var(--info); }
+    .bottom-nav .nav-ico { font-size: 1.05rem; line-height: 1; }
+
+    .drawer-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,.55);
+      opacity: 0; pointer-events: none; transition: .2s; z-index: 50;
+    }
+    .drawer-backdrop.open { opacity: 1; pointer-events: auto; }
+    .drawer {
+      position: fixed; top: 0; right: 0; height: 100%; width: min(360px, 92vw);
+      background: #12161f; border-left: 1px solid var(--line);
+      transform: translateX(105%); transition: .25s ease; z-index: 60;
+      padding: 16px 14px calc(20px + var(--safe-b)); overflow: auto;
+    }
+    .drawer.open { transform: none; }
+    .toast {
+      position: fixed; left: 50%; bottom: calc(var(--nav-h) + 20px + var(--safe-b));
+      transform: translateX(-50%) translateY(16px); opacity: 0;
+      background: #222836; border: 1px solid var(--line);
+      padding: 10px 14px; border-radius: 12px; font-weight: 700; font-size: .9rem;
+      z-index: 90; transition: .2s; pointer-events: none; max-width: 90vw;
+    }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    @media (min-width: 900px) { .toast { bottom: 28px; } }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div id="connBanner" class="conn-banner">Нет связи с котлом</div>
+
+    <section id="pageHome" class="page active">
+      <header class="topbar">
+        <div class="brand"><div class="brand-ico">🔥</div><span>КОТЁЛ</span></div>
+        <div class="ver-pill" id="verPill">4.5.0-beta</div>
+        <div class="top-right">
+          <div class="wifi-chip" title="WiFi"><span aria-hidden="true">📶</span><span id="wifiRssiTop">--</span></div>
+          <button class="icon-btn" id="btnMenu" type="button" aria-label="Меню">⋮</button>
+        </div>
+      </header>
+
+      <div class="summary-row">
+        <div class="sum-card" id="sumStatus">
+          <div class="sum-ico ok" id="sumStatusIco">🛡️</div>
+          <div class="sum-title" id="sumStatusTitle">РАБОТАЕТ</div>
+          <div class="sum-sub" id="sumStatusSub">Котёл в норме</div>
+        </div>
+        <div class="sum-card" id="sumActivity">
+          <div class="sum-ico warn" id="sumActIco">🔥</div>
+          <div class="sum-title" id="sumActTitle">НАГРЕВ</div>
+          <div class="sum-sub" id="sumActSub">Идёт нагрев</div>
+        </div>
+        <div class="sum-card" id="sumUptime">
+          <div class="sum-ico info">⏱️</div>
+          <div class="sum-title">АПТАЙМ</div>
+          <div class="sum-sub" id="sumUptimeVal">--:--:--</div>
+        </div>
+      </div>
+
+      <div class="home-grid-primary">
+        <div class="card" id="supplyCard">
+          <div class="label">Подача</div>
+          <div class="temp-big"><span id="supplyTemp">--</span><span class="temp-unit" id="supplyUnit">°C</span></div>
+          <div class="setpoint-line">Уставка: <b id="setpointLabel">--</b>°C</div>
+          <div class="gauge"><i id="supplyGauge"></i></div>
+          <div class="gauge-meta"><span id="gaugeMin">55</span><span id="gaugeMax">70 °C</span></div>
+        </div>
+        <div class="card" id="homeCard">
+          <div class="row-between">
+            <div class="label">Дом</div>
+            <span class="chip" id="homeOnlineChip">ОНЛАЙН</span>
+          </div>
+          <div class="temp-big"><span id="homeTemp">--</span><span class="temp-unit" id="homeUnit">°C</span></div>
+          <div class="setpoint-line">Уставка: <b id="homeTarget">--</b>°C</div>
+          <div class="row" id="homeModeRow" style="margin-top:4px;display:none">
+            <span class="chip blue" id="homeModeChip">🏠 Комфорт</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="home-grid-sec">
+        <div class="card mini">
+          <div class="label">Обратка</div>
+          <div class="temp-big"><span id="returnTemp">--</span><span class="temp-unit" id="returnUnit">°C</span></div>
+          <div class="trend-line" id="returnTrend"></div>
+        </div>
+        <div class="card mini">
+          <div class="label">Котельная</div>
+          <div class="temp-big"><span id="boilerTemp">--</span><span class="temp-unit" id="boilerUnit">°C</span></div>
+          <div class="trend-line" id="boilerTrend"></div>
+        </div>
+        <div class="card mini">
+          <div class="label">Улица</div>
+          <div class="temp-big"><span id="outdoorTemp">--</span><span class="temp-unit" id="outdoorUnit">°C</span></div>
+          <div class="trend-line" id="outdoorTrend"></div>
+        </div>
+        <div class="card mini">
+          <div class="label">Дымоход</div>
+          <div class="temp-big"><span id="flueTemp">--</span><span class="temp-unit" id="flueUnit">°C</span></div>
+          <div class="trend-line up" id="flueTrend"></div>
+        </div>
+      </div>
+
+      <div class="home-grid-2">
+        <div class="card mode-card" id="modeCard" title="Сменить режим">
+          <div class="label">Режим работы</div>
+          <div class="mode-name" id="modeTitle">Авто</div>
+          <div class="muted mode-hint-el" id="modeHint" style="margin-top:2px">Поддержание температуры подачи</div>
+        </div>
+        <div class="card">
+          <div class="row-between">
+            <div>
+              <div class="label">Система</div>
+              <div class="sys-state" id="systemLabel">ВКЛЮЧЕНА</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="systemEnabled" />
+              <span></span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div class="home-grid-2">
+        <div class="card">
+          <div class="equip">
+            <div class="equip-left">
+              <div class="equip-ico" id="fanIcon"><span class="fan-spin" id="fanSpin">🌀</span></div>
+              <div>
+                <div class="label">Вентилятор</div>
+                <div class="equip-state" id="fanLabel">Выключен</div>
+                <div class="muted" id="fanPower">Мощность: --</div>
+              </div>
+            </div>
+            <div class="ring" id="fanRing" style="--p:0"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="equip-left">
+            <div class="equip-ico" id="pumpIcon">💧</div>
+            <div>
+              <div class="label">Насос</div>
+              <div class="equip-state" id="pumpLabel">Выключен</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card coal-card">
+        <div class="coal-row">
+          <div>
+            <div class="label" style="color:var(--warn)">Подброс угля</div>
+            <div class="coal-timer hidden" id="coalTimer">02:45</div>
+            <div class="muted hidden" id="coalHint">Запуск цикла подброса</div>
+          </div>
+          <button class="btn primary" type="button" id="coalBtn">▶ Запустить</button>
+        </div>
+      </div>
+
+      <div class="alert warn-only" id="lowReturnAlert">
+        <div>⚠️</div>
+        <div>
+          <div style="font-weight:800">Низкая обратка</div>
+          <div class="muted">Температура обратки ниже нормы! Рекомендуется следить за температурой.</div>
+        </div>
+      </div>
+
+      <div class="tech-row">
+        <div class="tech-item"><div class="tech-dot" id="dotMqtt"></div><div><div class="tech-k">MQTT</div><div class="tech-v" id="techMqtt">--</div></div></div>
+        <div class="tech-item"><div class="tech-dot" id="dotWifi"></div><div><div class="tech-k">WiFi</div><div class="tech-v" id="techWifi">--</div></div></div>
+        <div class="tech-item"><div class="tech-dot" id="dotSensors"></div><div><div class="tech-k">Датчики</div><div class="tech-v" id="techSensors">--</div></div></div>
+        <div class="tech-item"><div class="tech-dot" id="dotSafety"></div><div><div class="tech-k">Безопасность</div><div class="tech-v" id="techSafety">--</div></div></div>
+      </div>
+    </section>
+
+    <section id="pageMenu" class="page">
+      <header class="topbar" style="grid-template-columns:1fr auto">
+        <div class="brand"><div class="brand-ico">⚙️</div><span>НАСТРОЙКИ</span></div>
+        <button class="icon-btn" type="button" onclick="showHome()">🏠</button>
+      </header>
+      <div class="section-title">Управление</div>
+      <div class="menu-list">
+        <button class="menu-item" type="button" onclick="openSettings('auto')"><span class="left"><span class="menu-ico">🌡️</span><span>Режим Авто</span></span><span>›</span></button>
+        <button class="menu-item" type="button" onclick="openSettings('comfort')"><span class="left"><span class="menu-ico">🏠</span><span>Режим Комфорт</span></span><span>›</span></button>
+        <button class="menu-item" type="button" onclick="setMode(2); showHome();"><span class="left"><span class="menu-ico">🧠</span><span>Режим Нейро</span></span><span>›</span></button>
+      </div>
+      <div class="section-title">Датчики</div>
+      <div class="menu-list">
+        <button class="menu-item" type="button" onclick="openSettings('sensors')"><span class="left"><span class="menu-ico">📡</span><span>Датчики</span></span><span>›</span></button>
+        <button class="menu-item" type="button" onclick="openSettings('pins')"><span class="left"><span class="menu-ico">🔌</span><span>Подключение</span></span><span>›</span></button>
+      </div>
+      <div class="section-title">Связь</div>
+      <div class="menu-list">
+        <button class="menu-item" type="button" onclick="openSettings('wifi')"><span class="left"><span class="menu-ico">📶</span><span>WiFi</span></span><span>›</span></button>
+        <button class="menu-item" type="button" onclick="openSettings('mqtt')"><span class="left"><span class="menu-ico">📨</span><span>MQTT</span></span><span>›</span></button>
+        <button class="menu-item" type="button" onclick="openSettings('tunnel')"><span class="left"><span class="menu-ico">🌐</span><span>VPS / туннель</span></span><span>›</span></button>
+      </div>
+      <div class="section-title">Система</div>
+      <div class="menu-list">
+        <button class="menu-item" type="button" onclick="openSettings('relay')"><span class="left"><span class="menu-ico">⚡</span><span>Реле</span></span><span>›</span></button>
+        <button class="menu-item" type="button" onclick="openSettings('ntp')"><span class="left"><span class="menu-ico">🕐</span><span>NTP</span></span><span>›</span></button>
+        <button class="menu-item" type="button" onclick="openSettings('update')"><span class="left"><span class="menu-ico">🔄</span><span>Обновления</span></span><span>›</span></button>
+        <button class="menu-item" type="button" onclick="openSettings('system')"><span class="left"><span class="menu-ico">ℹ️</span><span>Система</span></span><span>›</span></button>
+      </div>
+      <div class="section-title">Аналитика</div>
+      <div class="menu-list">
+        <button class="menu-item" type="button" onclick="openSettings('log')"><span class="left"><span class="menu-ico">📋</span><span>Журнал</span></span><span>›</span></button>
+        <button class="menu-item" type="button" onclick="openSettings('events')"><span class="left"><span class="menu-ico">📝</span><span>События</span></span><span>›</span></button>
+        <button class="menu-item" type="button" onclick="openSettings('ml')"><span class="left"><span class="menu-ico">🤖</span><span>ML / гипотезы</span></span><span>›</span></button>
+      </div>
+    </section>
+
+<section id="settingsHost" class="hidden">
+      <div id="settingsAuto" class="settings-page">
+        <div class="back-row"><button class="btn" type="button" onclick="closeSettings()">← Назад</button><strong>Режим Авто</strong></div>
+        <div class="settings-group">
+          <div class="field"><label>Уставка подачи °C</label><input id="autoSetpoint" type="number" min="40" max="80" step="1" /></div>
+          <div class="field"><label>Мин °C</label><input id="autoMinTemp" type="number" min="30" max="70" step="1" /></div>
+          <div class="field"><label>Макс °C</label><input id="autoMaxTemp" type="number" min="40" max="90" step="1" /></div>
+          <div class="field"><label>Гистерезис °C</label><input id="autoHysteresis" type="number" min="0.5" max="10" step="0.5" /></div>
+          <button class="btn primary block" type="button" onclick="saveAutoSettings()">Сохранить</button>
+        </div>
+      </div>
+
+      <div id="settingsComfort" class="settings-page">
+        <div class="back-row"><button class="btn" type="button" onclick="closeSettings()">← Назад</button><strong>Режим Комфорт</strong></div>
+        <div class="settings-group">
+          <div class="field"><label>Цель дома °C</label><input id="comfortTargetHomeTemp" type="number" min="15" max="30" step="0.5" /></div>
+          <div class="field"><label>Мин котла °C</label><input id="comfortMinBoilerTemp" type="number" step="1" /></div>
+          <div class="field"><label>Макс котла °C</label><input id="comfortMaxBoilerTemp" type="number" step="1" /></div>
+          <div class="field"><label>Темп. ожидания °C</label><input id="comfortWaitTemp" type="number" step="1" /></div>
+          <div class="field"><label>Гистерезис вкл</label><input id="comfortHysteresisOn" type="number" step="0.1" /></div>
+          <div class="field"><label>Гистерезис выкл</label><input id="comfortHysteresisOff" type="number" step="0.1" /></div>
+          <div class="field"><label>Гистерезис котла</label><input id="comfortHysteresisBoiler" type="number" step="0.1" /></div>
+          <button class="btn primary block" type="button" onclick="saveComfortSettings()">Сохранить</button>
+        </div>
+      </div>
+
+      <div id="settingsMqtt" class="settings-page">
+        <div class="back-row"><button class="btn" type="button" onclick="closeSettings()">← Назад</button><strong>MQTT</strong></div>
+        <div class="settings-group">
+          <label class="check"><input id="mqttEnabled" type="checkbox" /> Включен</label>
+          <div class="field"><label>Сервер</label><input id="mqttServer" /></div>
+          <div class="field"><label>Порт</label><input id="mqttPort" type="number" /></div>
+          <div class="field"><label>Пользователь</label><input id="mqttUser" /></div>
+          <div class="field"><label>Пароль</label><input id="mqttPassword" type="password" /></div>
+          <div class="field"><label>Префикс</label><input id="mqttPrefix" /></div>
+          <div class="field"><label>Топик дома</label><input id="mqttHomeTempTopic" /></div>
+          <div class="field"><label>LWT топик</label><input id="mqttHomeLwtTopic" /></div>
+          <div class="row" style="margin-top:8px">
+            <button class="btn primary" type="button" onclick="saveMqttSettings()">Сохранить</button>
+            <button class="btn" type="button" onclick="testMqtt()">Тест</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="settingsWifi" class="settings-page">
+        <div class="back-row"><button class="btn" type="button" onclick="closeSettings()">← Назад</button><strong>WiFi</strong></div>
+        <div class="settings-group">
+          <div class="muted">SSID: <b id="wifiSsid">--</b></div>
+          <div class="muted">IP: <b id="wifiIp">--</b></div>
+          <div class="muted">RSSI: <b id="wifiRssi">--</b></div>
+          <div class="muted">MAC: <b id="wifiMac">--</b></div>
+          <div class="row" style="margin-top:12px">
+            <button class="btn" type="button" onclick="scanWifi()">Сканировать</button>
+            <button class="btn" type="button" onclick="resetWifi()">Сброс WiFi</button>
+          </div>
+          <pre id="wifiScanOut" class="muted" style="white-space:pre-wrap;margin-top:10px"></pre>
+        </div>
+      </div>
+
+      <div id="settingsSensors" class="settings-page">
+        <div class="back-row"><button class="btn" type="button" onclick="closeSettings()">← Назад</button><strong>Датчики</strong></div>
+        <div class="settings-group">
+          <button class="btn" type="button" onclick="scanSensors()">Сканировать</button>
+          <pre id="sensorScanOut" class="muted" style="white-space:pre-wrap;margin-top:10px"></pre>
+          <div class="field"><label>Подача</label><input id="mapSupply" /></div>
+          <div class="field"><label>Обратка</label><input id="mapReturn" /></div>
+          <div class="field"><label>Котельная</label><input id="mapBoiler" /></div>
+          <div class="field"><label>Улица</label><input id="mapOutdoor" /></div>
+          <button class="btn primary block" type="button" onclick="saveSensorMapping()">Сохранить mapping</button>
+        </div>
+      </div>
+
+      <div id="settingsPins" class="settings-page">
+        <div class="back-row"><button class="btn" type="button" onclick="closeSettings()">← Назад</button><strong>Подключение</strong></div>
+        <div class="info-box">Распиновка 4.5-beta. GPIO25 — реле снятия питания DS18B20, не питание с GPIO.</div>
+        <div class="settings-group">
+          <h3>PT1000 (MAX31865)</h3>
+          <div class="muted">GPIO 27 → CS · PT1000 подача (3-wire)</div>
+          <div class="muted">GPIO 26 → CS · PT1000 дымоход (2-wire)</div>
+          <div class="muted">SPI: SCK 32 · MOSI 33 · MISO 34</div>
+        </div>
+        <div class="settings-group">
+          <h3>DS18B20</h3>
+          <div class="muted">GPIO 4 · OW1 — обратка</div>
+          <div class="muted">GPIO 5 · OW2 — котельная + улица</div>
+          <div class="muted">GPIO 25 · реле питания шин</div>
+        </div>
+        <div class="settings-group">
+          <h3>Силовые / UI</h3>
+          <div class="muted">Вентилятор 16 · Насос 17</div>
+          <div class="muted">OLED 21/22 · Энкодер 18/19/23 · GPIO2 свободен</div>
+        </div>
+      </div>
+
+      <div id="settingsNtp" class="settings-page">
+        <div class="back-row"><button class="btn" type="button" onclick="closeSettings()">← Назад</button><strong>NTP</strong></div>
+        <div class="settings-group">
+          <div class="muted">Время: <b id="ntpCurrentTime">--</b></div>
+          <div class="muted">Дата: <b id="ntpCurrentDate">--</b></div>
+          <div class="muted">Статус: <b id="ntpSyncStatus">--</b></div>
+          <label class="check"><input id="ntpEnabled" type="checkbox" /> Включен</label>
+          <div class="field"><label>Сервер</label><input id="ntpServer" /></div>
+          <div class="field"><label>Часовой пояс</label><input id="ntpTimezone" type="number" min="-12" max="14" /></div>
+          <div class="field"><label>Интервал, часов</label><input id="ntpUpdateInterval" type="number" min="1" max="24" /></div>
+          <button class="btn primary block" type="button" onclick="saveNtpSettings()">Сохранить</button>
+        </div>
+      </div>
+
+      <div id="settingsMl" class="settings-page">
+        <div class="back-row"><button class="btn" type="button" onclick="closeSettings()">← Назад</button><strong>ML / гипотезы</strong></div>
+        <div class="settings-group">
+          <label class="check"><input id="mlEnabled" type="checkbox" /> Включен</label>
+          <label class="check"><input id="mlObserveOnly" type="checkbox" checked /> Только наблюдение</label>
+          <button class="btn primary block" type="button" onclick="saveMlSettings()">Сохранить</button>
+          <pre id="hypothesesOut" class="muted" style="white-space:pre-wrap;margin-top:12px"></pre>
+        </div>
+      </div>
+
+      <div id="settingsRelay" class="settings-page">
+        <div class="back-row"><button class="btn" type="button" onclick="closeSettings()">← Назад</button><strong>Реле</strong></div>
+        <div class="settings-group">
+          <label class="check"><input id="fanActiveHigh" type="checkbox" checked /> Fan active HIGH</label>
+          <label class="check"><input id="pumpActiveHigh" type="checkbox" checked /> Pump active HIGH</label>
+          <label class="check"><input id="sensorPwrActiveHigh" type="checkbox" checked /> Sensor power active HIGH</label>
+          <button class="btn primary block" type="button" onclick="saveRelaySettings()">Сохранить</button>
+          <div class="row" style="margin-top:12px">
+            <button class="btn" type="button" onclick="controlDevice('fan',1)">Fan ON</button>
+            <button class="btn" type="button" onclick="controlDevice('fan',0)">Fan OFF</button>
+            <button class="btn" type="button" onclick="controlDevice('pump',1)">Pump ON</button>
+            <button class="btn" type="button" onclick="controlDevice('pump',0)">Pump OFF</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="settingsUpdate" class="settings-page">
+        <div class="back-row"><button class="btn" type="button" onclick="closeSettings()">← Назад</button><strong>Обновления</strong></div>
+        <div class="settings-group">
+          <div class="muted">Канал: <b>v45-beta</b></div>
+          <div class="muted">Текущая: <b id="updCurrent">--</b></div>
+          <div class="muted">Последняя: <b id="updLatest">--</b></div>
+          <div class="muted" id="updStatus">—</div>
+          <div class="row" style="margin-top:10px">
+            <button class="btn" type="button" onclick="checkUpdates()">Проверить</button>
+            <button class="btn primary" type="button" onclick="installUpdate()">Установить</button>
+          </div>
+          <label class="check"><input id="autoCheckEnabled" type="checkbox" /> Автопроверка</label>
+          <div class="field"><label>Интервал, часов</label><input id="checkInterval" type="number" min="1" max="168" /></div>
+          <button class="btn block" type="button" onclick="saveUpdateSettings()">Сохранить</button>
+        </div>
+      </div>
+
+      <div id="settingsTunnel" class="settings-page">
+        <div class="back-row"><button class="btn" type="button" onclick="closeSettings()">← Назад</button><strong>VPS / туннель</strong></div>
+        <div class="settings-group">
+          <label class="check"><input id="tunnelEnabled" type="checkbox" /> Туннель включен</label>
+          <div class="field"><label>Хост</label><input id="tunnelVpsHost" /></div>
+          <div class="field"><label>Порт</label><input id="tunnelVpsPort" type="number" /></div>
+          <div class="field"><label>Токен</label><input id="tunnelAuthToken" /></div>
+          <div class="field"><label>VPS base URL (ESP ingest)</label><input id="vpsBaseUrl" placeholder="https://esp.pahavpn.cloud-ip.cc" /></div>
+          <div class="field"><label>Ingest token</label><input id="vpsToken" type="password" /></div>
+          <div class="row">
+            <button class="btn primary" type="button" onclick="saveTunnelSettings()">Сохранить туннель</button>
+            <button class="btn" type="button" onclick="saveVpsSettings()">Сохранить VPS</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="settingsSystem" class="settings-page">
+        <div class="back-row"><button class="btn" type="button" onclick="closeSettings()">← Назад</button><strong>Система</strong></div>
+        <div class="settings-group">
+          <div class="muted">Версия: <b id="sysVersion">--</b></div>
+          <div class="muted">IP: <b id="sysIp">--</b></div>
+          <div class="muted">MAC: <b id="sysMac">--</b></div>
+          <div class="muted">Uptime: <b id="sysUptime">--</b></div>
+          <div class="muted">Free mem: <b id="sysMem">--</b></div>
+          <button class="btn block" style="margin-top:12px" type="button" onclick="rebootDevice()">Перезагрузка</button>
+        </div>
+      </div>
+
+      <div id="settingsLog" class="settings-page">
+        <div class="back-row"><button class="btn" type="button" onclick="closeSettings()">← Назад</button><strong>Журнал</strong></div>
+        <div class="settings-group">
+          <div class="muted">Boot count: <b id="bootCount">--</b></div>
+          <pre id="bootLogOut" class="muted" style="white-space:pre-wrap;margin-top:10px"></pre>
+          <button class="btn" type="button" onclick="resetBootCount()">Сбросить счётчик</button>
+        </div>
+      </div>
+
+      <div id="settingsEvents" class="settings-page">
+        <div class="back-row"><button class="btn" type="button" onclick="closeSettings()">← Назад</button><strong>События</strong></div>
+        <div class="settings-group">
+          <div class="field"><label>Текст события</label><input id="eventText" placeholder="загрузил уголь" /></div>
+          <button class="btn primary block" type="button" onclick="sendUserEvent()">Отправить</button>
+          <pre id="journalOut" class="muted" style="white-space:pre-wrap;margin-top:12px"></pre>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  
+  </div>
+
+  <nav class="bottom-nav" aria-label="Навигация">
+    <button type="button" class="active" id="navHome" onclick="showHome()"><span class="nav-ico">🏠</span>Главная</button>
+    <button type="button" id="navMenu" onclick="showMenu()"><span class="nav-ico">⚙️</span>Настройки</button>
+    <button type="button" id="navLog" onclick="openSettings('log')"><span class="nav-ico">📋</span>Журнал</button>
+    <button type="button" id="navEvents" onclick="openSettings('events')"><span class="nav-ico">📝</span>События</button>
+    <button type="button" id="navSystem" onclick="openSettings('system')"><span class="nav-ico">ℹ️</span>Система</button>
+  </nav>
+
+  <div class="sheet-bg" id="modeSheetBg"></div>
+  <div class="sheet" id="modeSheet" role="dialog" aria-label="Режим">
+    <h3>Режим работы</h3>
+    <button class="opt" type="button" data-mode="0"><b>Авто</b><span>Поддержание температуры подачи</span></button>
+    <button class="opt" type="button" data-mode="1"><b>Комфорт</b><span>Ориентир по температуре дома</span></button>
+    <button class="opt" type="button" data-mode="2"><b>Нейро</b><span>Наблюдение и анализ</span></button>
+  </div>
+
+  <div class="drawer-backdrop" id="drawerBackdrop"></div>
+  <aside class="drawer" id="drawer" aria-hidden="true">
+    <div class="row-between" style="margin-bottom:12px">
+      <strong>Меню</strong>
+      <button class="icon-btn" type="button" id="drawerClose">✕</button>
+    </div>
+    <div class="menu-list">
+      <button class="menu-item" type="button" onclick="drawerGo(() => openSettings('auto'))"><span class="left"><span class="menu-ico">🌡️</span><span>Авто</span></span><span>›</span></button>
+      <button class="menu-item" type="button" onclick="drawerGo(() => openSettings('comfort'))"><span class="left"><span class="menu-ico">🏠</span><span>Комфорт</span></span><span>›</span></button>
+      <button class="menu-item" type="button" onclick="drawerGo(() => { setMode(2); showHome(); })"><span class="left"><span class="menu-ico">🧠</span><span>Нейро</span></span><span>›</span></button>
+      <button class="menu-item" type="button" onclick="drawerGo(() => openSettings('wifi'))"><span class="left"><span class="menu-ico">📶</span><span>WiFi</span></span><span>›</span></button>
+      <button class="menu-item" type="button" onclick="drawerGo(() => openSettings('mqtt'))"><span class="left"><span class="menu-ico">📨</span><span>MQTT</span></span><span>›</span></button>
+      <button class="menu-item" type="button" onclick="drawerGo(() => openSettings('sensors'))"><span class="left"><span class="menu-ico">📡</span><span>Датчики</span></span><span>›</span></button>
+      <button class="menu-item" type="button" onclick="drawerGo(() => openSettings('pins'))"><span class="left"><span class="menu-ico">🔌</span><span>Подключение</span></span><span>›</span></button>
+      <button class="menu-item" type="button" onclick="drawerGo(() => openSettings('log'))"><span class="left"><span class="menu-ico">📋</span><span>Журнал</span></span><span>›</span></button>
+      <button class="menu-item" type="button" onclick="drawerGo(() => openSettings('system'))"><span class="left"><span class="menu-ico">ℹ️</span><span>Система</span></span><span>›</span></button>
+      <button class="menu-item" type="button" onclick="drawerGo(() => showMenu())"><span class="left"><span class="menu-ico">⋯</span><span>Все разделы</span></span><span>›</span></button>
+    </div>
+  </aside>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+
+    const DEMO = new URLSearchParams(location.search).has('demo');
+    let lastStatus = null;
+    let pollTimer = null;
+    let coalLocalUntil = 0;
+    let offline = false;
+
+    const MODE_HINT = {
+      0: 'Поддержание температуры подачи',
+      1: 'Ориентир по температуре дома',
+      2: 'Наблюдение и анализ'
+    };
+    const MODE_NAME = { 0: 'Авто', 1: 'Комфорт', 2: 'Нейро' };
+
+    function toast(msg) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.classList.add('show');
+      clearTimeout(toast._t);
+      toast._t = setTimeout(() => el.classList.remove('show'), 2200);
+    }
+
+    function $(id) { return document.getElementById(id); }
+
+    async function api(path, opts) {
+      if (DEMO && (!opts || opts.method === undefined || opts.method === 'GET')) {
+        return demoApi(path);
+      }
+      const r = await fetch(path, opts);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const ct = r.headers.get('content-type') || '';
+      if (ct.includes('application/json')) return r.json();
+      return r.text();
+    }
+
+    function demoStatus() {
+      const now = Date.now();
+      const coal = coalLocalUntil > now;
+      return {
+        supplyTemp: 62.3, returnTemp: 48.1, boilerTemp: 35.0, outdoorTemp: -5.2,
+        homeTemp: 23.4, flueTemp: 180, setpoint: 60, hysteresis: 2,
+        fan: true, fanPowerPct: 100, pump: true, systemEnabled: true,
+        state: coal ? 'COAL_FEEDING' : 'HEATING',
+        workMode: 0, workModeName: 'Авто', mode: 'auto',
+        homeTempSensorValid: true, homeTempSensorLWTOnline: true,
+        targetHomeTemp: 22.0, firmwareVersion: '4.5.0-beta', version: '4.5.0-beta',
+        wifiStatus: 'Подключен', wifiRSSI: -55, mqttStatus: 'Подключен',
+        coalFeeding: coal, coalFeedingRemaining: coal ? Math.ceil((coalLocalUntil - now) / 1000) : 0,
+        lowReturnTemp: false, safetyTrip: false, safetyReason: '',
+        sensorPowerOn: true, supplyTrend: 1, returnTrend: -1, boilerTrend: 0,
+        outdoorTrend: -1, homeTrend: 1, autoMin: 55, autoMax: 70, comfortRoom: 22,
+        uptime: 3615, freeHeap: 120000
+      };
+    }
+
+    function demoApi(path) {
+      if (path.startsWith('/api/status')) return demoStatus();
+      if (path.startsWith('/api/system/mode')) return { mode: (lastStatus && lastStatus.workMode) || 0, success: true };
+      if (path.startsWith('/api/settings/auto')) return { setpoint: 60, hysteresis: 2, autoMin: 55, autoMax: 70 };
+      if (path.startsWith('/api/settings/comfort')) return { targetHomeTemp: 22, minBoilerTemp: 50, maxBoilerTemp: 75, waitTemp: 45, hysteresisOn: 0.3, hysteresisOff: 0.3, hysteresisBoiler: 2 };
+      if (path.startsWith('/api/settings/mqtt')) return { enabled: false, server: '', port: 1883, prefix: 'boiler' };
+      if (path.startsWith('/api/wifi/info')) return { ssid: 'Home', ip: '192.168.1.50', rssi: -55, mac: 'AA:BB:CC', status: 'connected' };
+      if (path.startsWith('/api/system/info')) return { version: '4.5.0-beta', ip: '192.168.1.50', mac: 'AA:BB', uptime: '1h', freeMem: '120 KB' };
+      if (path.startsWith('/api/system/log')) return { currentBootCount: 1, entries: [{ bootCount: 1, datetime: 'now', reason: 'POWERON' }] };
+      if (path.startsWith('/api/ntp/')) return { enabled: true, server: 'pool.ntp.org', timezone: 3, updateInterval: 3600, time: '12:00:00', date: '13.08.2026', synced: true };
+      if (path.startsWith('/api/ml/')) return { enabled: false, observeOnly: true, hypotheses: 0 };
+      if (path.startsWith('/api/hypotheses')) return { items: [] };
+      if (path.startsWith('/api/journal')) return { entries: [] };
+      if (path.startsWith('/api/update/')) return { currentVersion: '4.5.0-beta', latestVersion: '4.5.0-beta', updateAvailable: false, autoCheck: true, checkIntervalHours: 24 };
+      if (path.startsWith('/api/tunnel/')) return { enabled: false };
+      if (path.startsWith('/api/settings/relay')) return { fanActiveHigh: true, pumpActiveHigh: true, sensorPwrActiveHigh: true };
+      if (path.startsWith('/api/sensors/')) return { success: true, sensors: [], supply: 'pt1000_cs27', return: 'ow1', boiler: 'ow2_a', outdoor: 'ow2_b' };
+      if (path.startsWith('/api/coalFeeding')) return { active: false, remaining: 0 };
+      return { success: true };
+    }
+
+    function fmtTemp(v, valueEl, unitEl) {
+      if (v === null || v === undefined || Number.isNaN(Number(v))) {
+        valueEl.textContent = '--';
+        if (unitEl) unitEl.style.display = 'none';
+        return;
+      }
+      valueEl.textContent = Number(v).toFixed(Math.abs(Number(v)) >= 100 ? 0 : 1);
+      if (unitEl) unitEl.style.display = 'inline';
+    }
+
+    function setTrend(el, t) {
+      if (!el) return;
+      if (t === 1) { el.textContent = '↑'; el.className = 'trend up'; }
+      else if (t === -1) { el.textContent = '↓'; el.className = 'trend down'; }
+      else { el.textContent = ''; el.className = 'trend'; }
+    }
+
+    function humanState(d) {
+      if (offline) return { tone: 'bad', title: 'НЕТ СВЯЗИ', sub: 'Нет ответа от котла' };
+      if (d.safetyTrip) return { tone: 'bad', title: 'АВАРИЯ', sub: d.safetyReason || 'Система безопасности' };
+      if (d.systemEnabled === false) return { tone: 'idle', title: 'КОТЁЛ ОСТАНОВЛЕН', sub: 'Система выключена' };
+      if (d.coalFeeding) {
+        const sec = d.coalFeedingRemaining || 0;
+        const mm = String(Math.floor(sec / 60)).padStart(2, '0');
+        const ss = String(sec % 60).padStart(2, '0');
+        return { tone: 'warn', title: 'ПОДБРОС ТОПЛИВА', sub: 'До завершения ' + mm + ':' + ss };
+      }
+      if (d.supplyTemp != null && d.supplyTemp >= 77) return { tone: 'bad', title: 'ПЕРЕГРЕВ', sub: 'Система безопасности активна' };
+
+      const st = String(d.state || '').toUpperCase();
+      const map = {
+        HEATING: ['ok', 'КОТЁЛ РАБОТАЕТ', 'Идёт нагрев'],
+        IDLE: ['info', 'ОЖИДАНИЕ', 'Температура достигнута'],
+        COAL_BURNED: ['warn', 'УГОЛЬ ПРОГОРЕЛ', 'Нужна загрузка топлива'],
+        OVERHEAT: ['bad', 'ПЕРЕГРЕВ', 'Система безопасности активна'],
+        HIGH_TEMP: ['warn', 'ВЫСОКАЯ ТЕМПЕРАТУРА', 'Контроль подачи'],
+        SUPPLY_INVALID: ['bad', 'НЕТ ДАТЧИКА ПОДАЧИ', 'Проверьте PT1000'],
+        COAL_FEEDING: ['warn', 'ПОДБРОС ТОПЛИВА', 'Идёт цикл']
+      };
+      if (map[st]) return { tone: map[st][0], title: map[st][1], sub: map[st][2] };
+      if (d.fan || d.pump) return { tone: 'ok', title: 'КОТЁЛ РАБОТАЕТ', sub: humanStateName(d.state) || 'Оборудование активно' };
+      return { tone: 'info', title: 'ОЖИДАНИЕ', sub: humanStateName(d.state) || 'Температура в норме' };
+    }
+
+    function humanStateName(state) {
+      const s = String(state || '');
+      const dict = {
+        IDLE: 'Ожидание', HEATING: 'Идёт нагрев', COAL_BURNED: 'Уголь прогорел',
+        OVERHEAT: 'Перегрев', HIGH_TEMP: 'Высокая температура',
+        supply_invalid: 'Нет датчика подачи', HEATING_TIMEOUT: 'Таймаут нагрева'
+      };
+      return dict[s] || dict[s.toUpperCase()] || (s ? s : '');
+    }
+
+    
+    function fmtUptime(sec) {
+      sec = Math.max(0, Number(sec) || 0);
+      const h = String(Math.floor(sec / 3600)).padStart(2, '0');
+      const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
+      const s = String(sec % 60).padStart(2, '0');
+      return h + ':' + m + ':' + s;
+    }
+
+    function setTrendText(el, t) {
+      if (!el) return;
+      if (t === 1) { el.textContent = '↑ растёт'; el.className = 'trend-line up'; }
+      else if (t === -1) { el.textContent = '↓ падает'; el.className = 'trend-line down'; }
+      else if (t === 0) { el.textContent = '— без изм.'; el.className = 'trend-line flat'; }
+      else { el.textContent = ''; el.className = 'trend-line'; }
+    }
+
+    function setDot(el, tone) {
+      if (!el) return;
+      el.className = 'tech-dot' + (tone && tone !== 'ok' ? (' ' + tone) : '');
+    }
+
+    function applyStatus(d) {
+      lastStatus = d;
+      const hs = humanState(d);
+      const mode = Number(d.workMode || 0);
+      const online = d.homeTempSensorLWTOnline !== false;
+
+      // summary cards
+      const ico = $('sumStatusIco');
+      ico.className = 'sum-ico ' + hs.tone;
+      ico.textContent = hs.tone === 'bad' ? '⛔' : hs.tone === 'warn' ? '⚠️' : hs.tone === 'idle' ? '⚪' : '🛡️';
+      $('sumStatusTitle').textContent = hs.title.replace(/^КОТЁЛ\s+/, '').replace(/^НЕТ\s+/, 'НЕТ ');
+      // shorten titles for small cards
+      let stTitle = 'РАБОТАЕТ';
+      let stSub = 'Котёл в норме';
+      if (offline) { stTitle = 'НЕТ СВЯЗИ'; stSub = 'Нет ответа'; ico.className = 'sum-ico bad'; ico.textContent = '⛔'; }
+      else if (d.safetyTrip) { stTitle = 'АВАРИЯ'; stSub = d.safetyReason || 'Safety'; ico.className = 'sum-ico bad'; ico.textContent = '⛔'; }
+      else if (d.systemEnabled === false) { stTitle = 'ОСТАНОВЛЕН'; stSub = 'Система выкл.'; ico.className = 'sum-ico idle'; ico.textContent = '⚪'; }
+      else if (d.coalFeeding) { stTitle = 'ПОДБРОС'; stSub = 'Цикл топлива'; ico.className = 'sum-ico warn'; ico.textContent = '🔥'; }
+      else if (d.supplyTemp != null && d.supplyTemp >= 77) { stTitle = 'ПЕРЕГРЕВ'; stSub = 'Безопасность'; ico.className = 'sum-ico bad'; ico.textContent = '⛔'; }
+      else if (String(d.state||'').toUpperCase() === 'IDLE' || (!d.fan && !d.pump && d.systemEnabled)) {
+        if (String(d.state||'').toUpperCase() === 'IDLE') { stTitle = 'ОЖИДАНИЕ'; stSub = 'Температура достигнута'; ico.className = 'sum-ico info'; ico.textContent = '🛡️'; }
+        else { stTitle = 'РАБОТАЕТ'; stSub = 'Котёл в норме'; }
+      }
+      $('sumStatusTitle').textContent = stTitle;
+      $('sumStatusSub').textContent = stSub;
+
+      // activity
+      const actIco = $('sumActIco');
+      let actTitle = 'ОЖИДАНИЕ';
+      let actSub = 'Нет нагрева';
+      actIco.className = 'sum-ico info';
+      actIco.textContent = '💤';
+      if (d.coalFeeding) { actTitle = 'ПОДБРОС'; actSub = 'Загрузка топлива'; actIco.className = 'sum-ico warn'; actIco.textContent = '🔥'; }
+      else if (d.fan || String(d.state||'').toUpperCase() === 'HEATING') { actTitle = 'НАГРЕВ'; actSub = 'Идёт нагрев'; actIco.className = 'sum-ico warn'; actIco.textContent = '🔥'; }
+      else if (d.pump) { actTitle = 'НАСОС'; actSub = 'Циркуляция'; actIco.className = 'sum-ico info'; actIco.textContent = '💧'; }
+      else if (d.systemEnabled === false) { actTitle = 'СТОП'; actSub = 'Система выкл.'; actIco.className = 'sum-ico idle'; actIco.textContent = '⚪'; }
+      $('sumActTitle').textContent = actTitle;
+      $('sumActSub').textContent = actSub;
+      $('sumUptimeVal').textContent = fmtUptime(d.uptime);
+
+      // version / wifi top
+      if (d.firmwareVersion || d.version) $('verPill').textContent = d.firmwareVersion || d.version;
+      const rssi = d.wifiRSSI;
+      $('wifiRssiTop').textContent = (rssi != null && rssi !== 0) ? (rssi + ' dBm') : '--';
+
+      fmtTemp(d.supplyTemp, $('supplyTemp'), $('supplyUnit'));
+      fmtTemp(d.returnTemp, $('returnTemp'), $('returnUnit'));
+      fmtTemp(d.boilerTemp, $('boilerTemp'), $('boilerUnit'));
+      fmtTemp(d.outdoorTemp, $('outdoorTemp'), $('outdoorUnit'));
+      fmtTemp(d.flueTemp, $('flueTemp'), $('flueUnit'));
+      setTrendText($('returnTrend'), d.returnTrend);
+      setTrendText($('boilerTrend'), d.boilerTrend);
+      setTrendText($('outdoorTrend'), d.outdoorTrend);
+      setTrendText($('flueTrend'), d.flueTrend != null ? d.flueTrend : (d.supplyTrend));
+
+      const sp = d.setpoint != null ? Number(d.setpoint) : null;
+      $('setpointLabel').textContent = sp != null ? sp.toFixed(0) : '--';
+      const amin = Number(d.autoMin != null ? d.autoMin : 55);
+      const amax = Number(d.autoMax != null ? d.autoMax : 70);
+      $('gaugeMin').textContent = String(amin);
+      $('gaugeMax').textContent = amax + ' °C';
+      if (d.supplyTemp != null && amax > amin) {
+        const p = Math.max(0, Math.min(100, ((Number(d.supplyTemp) - amin) / (amax - amin)) * 100));
+        $('supplyGauge').style.width = p + '%';
+      }
+
+      const chip = $('homeOnlineChip');
+      if (!online) {
+        $('homeTemp').textContent = 'OFFLINE';
+        $('homeUnit').style.display = 'none';
+        chip.textContent = 'OFFLINE';
+        chip.className = 'chip off';
+      } else {
+        fmtTemp(d.homeTemp, $('homeTemp'), $('homeUnit'));
+        chip.textContent = 'ОНЛАЙН';
+        chip.className = 'chip';
+      }
+      const target = d.targetHomeTemp != null ? d.targetHomeTemp : d.comfortRoom;
+      $('homeTarget').textContent = target != null ? Number(target).toFixed(1) : '--';
+      $('homeModeChip').style.display = mode === 1 ? 'inline-flex' : 'none';
+      if ($('homeModeRow')) $('homeModeRow').style.display = mode === 1 ? 'flex' : 'none';
+      $('homeCard').style.outline = mode === 1 ? '1px solid rgba(77,163,255,.35)' : 'none';
+
+      $('modeTitle').textContent = MODE_NAME[mode] || 'Авто';
+      $('modeHint').textContent = MODE_HINT[mode] || '';
+      document.querySelectorAll('#modeSheet .opt').forEach(btn => {
+        btn.classList.toggle('active', Number(btn.dataset.mode) === mode);
+      });
+
+      const en = !!d.systemEnabled;
+      const sys = $('systemEnabled');
+      if (sys.checked !== en) sys.checked = en;
+      $('systemLabel').textContent = en ? 'ВКЛЮЧЕНА' : 'ВЫКЛЮЧЕНА';
+      $('systemLabel').className = 'sys-state' + (en ? '' : ' off');
+
+      const fanOn = !!d.fan;
+      $('fanLabel').textContent = fanOn ? 'Включен' : 'Выключен';
+      $('fanLabel').className = 'equip-state' + (fanOn ? ' on' : '');
+      $('fanIcon').classList.toggle('on', fanOn);
+      $('fanSpin').classList.toggle('on', fanOn);
+      const pct = d.fanPowerPct != null ? Number(d.fanPowerPct) : (fanOn ? 100 : 0);
+      $('fanPower').textContent = 'Мощность: ' + pct + '%';
+      $('fanRing').style.setProperty('--p', String(pct));
+      $('fanRing').title = pct + '%';
+
+      const pumpOn = !!d.pump;
+      $('pumpLabel').textContent = pumpOn ? 'Включен' : 'Выключен';
+      $('pumpLabel').className = 'equip-state' + (pumpOn ? ' on' : '');
+      $('pumpIcon').classList.toggle('on', pumpOn);
+
+      const coal = !!d.coalFeeding;
+      $('coalTimer').classList.toggle('hidden', !coal);
+      if (coal) {
+        const sec = d.coalFeedingRemaining || 0;
+        const mm = String(Math.floor(sec / 60)).padStart(2, '0');
+        const ss = String(sec % 60).padStart(2, '0');
+        $('coalTimer').textContent = mm + ':' + ss;
+        $('coalHint').textContent = 'До завершения';
+        $('coalHint').classList.add('hidden');
+        $('coalBtn').textContent = 'Активен';
+        $('coalBtn').disabled = true;
+      } else {
+        $('coalHint').textContent = 'Запуск цикла подброса';
+        $('coalHint').classList.add('hidden');
+        $('coalBtn').textContent = '▶ Запустить';
+        $('coalBtn').disabled = false;
+      }
+
+      const low = !!d.lowReturnTemp && !d.safetyTrip;
+      $('lowReturnAlert').classList.toggle('show', low);
+
+      // tech footer
+      const mqtt = d.mqttStatus || '--';
+      $('techMqtt').textContent = mqtt;
+      setDot($('dotMqtt'), /подключ/i.test(String(mqtt)) ? 'ok' : (/выключ/i.test(String(mqtt)) ? 'idle' : 'warn'));
+      const wr = (rssi != null && rssi !== 0) ? (rssi + ' dBm') : (d.wifiStatus || '--');
+      $('techWifi').textContent = wr;
+      setDot($('dotWifi'), (rssi != null && rssi > -80) ? 'ok' : (rssi != null ? 'warn' : 'idle'));
+      const sensOn = d.sensorPowerOn !== false;
+      $('techSensors').textContent = sensOn ? 'Питание вкл.' : 'Питание выкл.';
+      setDot($('dotSensors'), sensOn ? 'ok' : 'warn');
+      if (d.safetyTrip) {
+        $('techSafety').textContent = 'Авария';
+        setDot($('dotSafety'), 'bad');
+      } else {
+        $('techSafety').textContent = 'Норма';
+        setDot($('dotSafety'), 'ok');
+      }
+    }
+
+async function updateData() {
+      try {
+        const d = await api('/api/status');
+        offline = false;
+        $('connBanner').classList.remove('show');
+        applyStatus(d);
+      } catch (e) {
+        offline = true;
+        $('connBanner').classList.add('show');
+        if (lastStatus) applyStatus(lastStatus);
+        else applyStatus(demoStatus());
+      }
+    }
+
+    async function setMode(mode) {
+      try {
+        if (DEMO) {
+          if (!lastStatus) lastStatus = demoStatus();
+          lastStatus.workMode = mode;
+          lastStatus.mode = mode === 1 ? 'comfort' : mode === 2 ? 'neuro' : 'auto';
+          applyStatus(lastStatus);
+          toast('Режим: ' + MODE_NAME[mode]);
+          return;
+        }
+        await api('/api/system/mode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode })
+        });
+        toast('Режим: ' + MODE_NAME[mode]);
+        updateData();
+      } catch (e) {
+        toast('Не удалось сменить режим');
+      }
+    }
+
+    async function toggleSystem() {
+      const en = $('systemEnabled').checked;
+      try {
+        if (DEMO) {
+          lastStatus = lastStatus || demoStatus();
+          lastStatus.systemEnabled = en;
+          applyStatus(lastStatus);
+          return;
+        }
+        await api('/api/system/enable?enabled=' + (en ? 1 : 0), { method: 'POST' });
+        updateData();
+      } catch (e) {
+        $('systemEnabled').checked = !en;
+        toast('Ошибка переключения системы');
+      }
+    }
+
+    async function startCoal() {
+      try {
+        if (DEMO) {
+          coalLocalUntil = Date.now() + 165000;
+          updateData();
+          toast('Подброс запущен');
+          return;
+        }
+        await api('/api/coalFeeding', { method: 'POST' });
+        toast('Подброс запущен');
+        updateData();
+      } catch (e) {
+        toast('Ошибка подброса');
+      }
+    }
+
+    function showHome() {
+      $('pageHome').classList.add('active');
+      $('pageMenu').classList.remove('active');
+      $('settingsHost').classList.add('hidden');
+      document.querySelectorAll('.settings-page').forEach(p => p.classList.remove('active'));
+      ['navHome','navMenu','navLog','navEvents','navSystem'].forEach(id => $(id).classList.remove('active'));
+      $('navHome').classList.add('active');
+      closeDrawer();
+    }
+
+    function showMenu() {
+      $('pageHome').classList.remove('active');
+      $('pageMenu').classList.add('active');
+      $('settingsHost').classList.add('hidden');
+      document.querySelectorAll('.settings-page').forEach(p => p.classList.remove('active'));
+      ['navHome','navMenu','navLog','navEvents','navSystem'].forEach(id => $(id).classList.remove('active'));
+      $('navMenu').classList.add('active');
+      closeDrawer();
+    }
+
+    function openSettings(name) {
+      const id = 'settings' + name.charAt(0).toUpperCase() + name.slice(1);
+      $('pageHome').classList.remove('active');
+      $('pageMenu').classList.remove('active');
+      $('settingsHost').classList.remove('hidden');
+      document.querySelectorAll('.settings-page').forEach(p => p.classList.remove('active'));
+      const page = $(id);
+      if (page) page.classList.add('active');
+      closeDrawer();
+      ['navHome','navMenu','navLog','navEvents','navSystem'].forEach(id => $(id).classList.remove('active'));
+      if (name === 'system') $('navSystem').classList.add('active');
+      else if (name === 'log') $('navLog').classList.add('active');
+      else if (name === 'events') $('navEvents').classList.add('active');
+      else $('navMenu').classList.add('active');
+      loadSettings(name);
+    }
+
+    function closeSettings() { showMenu(); }
+
+    function openDrawer() {
+      $('drawer').classList.add('open');
+      $('drawerBackdrop').classList.add('open');
+      $('drawer').setAttribute('aria-hidden', 'false');
+    }
+    function closeDrawer() {
+      $('drawer').classList.remove('open');
+      $('drawerBackdrop').classList.remove('open');
+      $('drawer').setAttribute('aria-hidden', 'true');
+    }
+    function drawerGo(fn) { closeDrawer(); fn(); }
+
+    async function loadSettings(name) {
+      try {
+        if (name === 'auto') {
+          const d = await api('/api/settings/auto');
+          if (d.setpoint != null) $('autoSetpoint').value = d.setpoint;
+          if (d.autoMin != null) $('autoMinTemp').value = d.autoMin;
+          if (d.autoMax != null) $('autoMaxTemp').value = d.autoMax;
+          if (d.hysteresis != null) $('autoHysteresis').value = d.hysteresis;
+        } else if (name === 'comfort') {
+          const d = await api('/api/settings/comfort');
+          if (d.targetHomeTemp != null) $('comfortTargetHomeTemp').value = d.targetHomeTemp;
+          if (d.minBoilerTemp != null) $('comfortMinBoilerTemp').value = d.minBoilerTemp;
+          if (d.maxBoilerTemp != null) $('comfortMaxBoilerTemp').value = d.maxBoilerTemp;
+          if (d.waitTemp != null) $('comfortWaitTemp').value = d.waitTemp;
+          if (d.hysteresisOn != null) $('comfortHysteresisOn').value = d.hysteresisOn;
+          if (d.hysteresisOff != null) $('comfortHysteresisOff').value = d.hysteresisOff;
+          if (d.hysteresisBoiler != null) $('comfortHysteresisBoiler').value = d.hysteresisBoiler;
+        } else if (name === 'mqtt') {
+          const d = await api('/api/settings/mqtt');
+          $('mqttEnabled').checked = !!d.enabled;
+          if (d.server != null) $('mqttServer').value = d.server;
+          if (d.port != null) $('mqttPort').value = d.port;
+          if (d.user != null) $('mqttUser').value = d.user;
+          if (d.password != null) $('mqttPassword').value = d.password;
+          if (d.prefix != null) $('mqttPrefix').value = d.prefix;
+          if (d.homeTempTopic != null) $('mqttHomeTempTopic').value = d.homeTempTopic;
+          if (d.homeLwtTopic != null) $('mqttHomeLwtTopic').value = d.homeLwtTopic;
+        } else if (name === 'wifi') {
+          const d = await api('/api/wifi/info');
+          $('wifiSsid').textContent = d.ssid || '--';
+          $('wifiIp').textContent = d.ip || '--';
+          $('wifiRssi').textContent = d.rssi != null ? d.rssi : '--';
+          $('wifiMac').textContent = d.mac || '--';
+        } else if (name === 'sensors') {
+          const d = await api('/api/sensors/mapping');
+          if (d.supply) $('mapSupply').value = d.supply;
+          if (d.return) $('mapReturn').value = d.return;
+          if (d.boiler) $('mapBoiler').value = d.boiler;
+          if (d.outdoor) $('mapOutdoor').value = d.outdoor;
+        } else if (name === 'ntp') {
+          const s = await api('/api/ntp/settings');
+          const t = await api('/api/ntp/time');
+          $('ntpEnabled').checked = !!s.enabled;
+          if (s.server) $('ntpServer').value = s.server;
+          if (s.timezone != null) $('ntpTimezone').value = s.timezone;
+          if (s.updateInterval != null) $('ntpUpdateInterval').value = Math.round(s.updateInterval / 3600) || 1;
+          if (t.time) $('ntpCurrentTime').textContent = t.time;
+          if (t.date) $('ntpCurrentDate').textContent = t.date;
+          $('ntpSyncStatus').textContent = t.synced ? 'Синхронизировано' : 'Нет синхронизации';
+        } else if (name === 'ml') {
+          const d = await api('/api/ml/settings');
+          $('mlEnabled').checked = !!d.enabled;
+          $('mlObserveOnly').checked = d.observeOnly !== false;
+          try {
+            const h = await api('/api/hypotheses');
+            $('hypothesesOut').textContent = JSON.stringify(h.items || h, null, 2);
+          } catch (_) {}
+        } else if (name === 'relay') {
+          const d = await api('/api/settings/relay');
+          if (d.fanActiveHigh != null) $('fanActiveHigh').checked = !!d.fanActiveHigh;
+          if (d.pumpActiveHigh != null) $('pumpActiveHigh').checked = !!d.pumpActiveHigh;
+          if (d.sensorPwrActiveHigh != null) $('sensorPwrActiveHigh').checked = !!d.sensorPwrActiveHigh;
+        } else if (name === 'update') {
+          const c = await api('/api/update/check');
+          $('updCurrent').textContent = c.currentVersion || '--';
+          $('updLatest').textContent = c.latestVersion || '--';
+          $('updStatus').textContent = c.updateAvailable ? 'Доступно обновление' : 'Актуально';
+          try {
+            const s = await api('/api/update/settings');
+            $('autoCheckEnabled').checked = !!s.autoCheck;
+            if (s.checkIntervalHours != null) $('checkInterval').value = s.checkIntervalHours;
+          } catch (_) {}
+        } else if (name === 'tunnel') {
+          const d = await api('/api/tunnel/settings');
+          $('tunnelEnabled').checked = !!d.enabled;
+          if (d.server != null) $('tunnelVpsHost').value = d.server;
+          if (d.port != null) $('tunnelVpsPort').value = d.port;
+          if (d.token != null) $('tunnelAuthToken').value = d.token;
+        } else if (name === 'system') {
+          const d = await api('/api/system/info');
+          $('sysVersion').textContent = d.version || '--';
+          $('sysIp').textContent = d.ip || '--';
+          $('sysMac').textContent = d.mac || '--';
+          $('sysUptime').textContent = d.uptime || '--';
+          $('sysMem').textContent = d.freeMem || '--';
+        } else if (name === 'log') {
+          const d = await api('/api/system/log');
+          $('bootCount').textContent = d.currentBootCount != null ? d.currentBootCount : '--';
+          $('bootLogOut').textContent = JSON.stringify(d.entries || [], null, 2);
+        } else if (name === 'events') {
+          try {
+            const j = await api('/api/journal');
+            $('journalOut').textContent = JSON.stringify(j.entries || j, null, 2);
+          } catch (_) { $('journalOut').textContent = 'Нет данных'; }
+        }
+      } catch (e) {
+        toast('Не удалось загрузить раздел');
+      }
+    }
+
+    async function postJson(url, body) {
+      if (DEMO) { toast('Сохранено (demo)'); return { success: true }; }
+      return api(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    }
+
+    async function saveAutoSettings() {
+      await postJson('/api/settings/auto', {
+        setpoint: Number($('autoSetpoint').value),
+        autoMin: Number($('autoMinTemp').value),
+        autoMax: Number($('autoMaxTemp').value),
+        hysteresis: Number($('autoHysteresis').value)
+      });
+      toast('Авто сохранено');
+    }
+    async function saveComfortSettings() {
+      await postJson('/api/settings/comfort', {
+        targetHomeTemp: Number($('comfortTargetHomeTemp').value),
+        minBoilerTemp: Number($('comfortMinBoilerTemp').value),
+        maxBoilerTemp: Number($('comfortMaxBoilerTemp').value),
+        waitTemp: Number($('comfortWaitTemp').value),
+        hysteresisOn: Number($('comfortHysteresisOn').value),
+        hysteresisOff: Number($('comfortHysteresisOff').value),
+        hysteresisBoiler: Number($('comfortHysteresisBoiler').value)
+      });
+      toast('Комфорт сохранён');
+    }
+    async function saveMqttSettings() {
+      await postJson('/api/settings/mqtt', {
+        enabled: $('mqttEnabled').checked,
+        server: $('mqttServer').value,
+        port: Number($('mqttPort').value || 1883),
+        user: $('mqttUser').value,
+        password: $('mqttPassword').value,
+        prefix: $('mqttPrefix').value,
+        homeTempTopic: $('mqttHomeTempTopic').value,
+        homeLwtTopic: $('mqttHomeLwtTopic').value
+      });
+      toast('MQTT сохранено');
+    }
+    async function testMqtt() {
+      try { const d = await api('/api/mqtt/test', { method: 'POST' }); toast(d.message || 'OK'); }
+      catch (e) { toast('Тест MQTT не удался'); }
+    }
+    async function scanWifi() {
+      try {
+        await api('/api/wifi/scan', { method: 'POST' });
+        setTimeout(async () => {
+          const d = await api('/api/wifi/scan/results');
+          $('wifiScanOut').textContent = JSON.stringify(d.networks || d, null, 2);
+        }, 1500);
+      } catch (e) { toast('Скан WiFi недоступен'); }
+    }
+    async function resetWifi() {
+      if (!confirm('Сбросить WiFi?')) return;
+      try { await api('/api/wifi/reset', { method: 'POST' }); toast('Сброс WiFi'); } catch (e) { toast('Ошибка'); }
+    }
+    async function scanSensors() {
+      try {
+        const d = await api('/api/sensors/scan', { method: 'POST' });
+        $('sensorScanOut').textContent = JSON.stringify(d.sensors || d, null, 2);
+      } catch (e) { toast('Скан датчиков недоступен'); }
+    }
+    async function saveSensorMapping() {
+      await postJson('/api/sensors/mapping', {
+        supply: $('mapSupply').value, return: $('mapReturn').value,
+        boiler: $('mapBoiler').value, outdoor: $('mapOutdoor').value
+      });
+      toast('Mapping сохранён');
+    }
+    async function saveNtpSettings() {
+      await postJson('/api/ntp/settings', {
+        enabled: $('ntpEnabled').checked,
+        server: $('ntpServer').value,
+        timezone: Number($('ntpTimezone').value),
+        updateInterval: Number($('ntpUpdateInterval').value) * 3600
+      });
+      toast('NTP сохранено');
+    }
+    async function saveMlSettings() {
+      await postJson('/api/ml/settings', {
+        enabled: $('mlEnabled').checked,
+        observeOnly: $('mlObserveOnly').checked
+      });
+      toast('ML сохранено');
+    }
+    async function saveRelaySettings() {
+      await postJson('/api/settings/relay', {
+        fanActiveHigh: $('fanActiveHigh').checked,
+        pumpActiveHigh: $('pumpActiveHigh').checked,
+        sensorPwrActiveHigh: $('sensorPwrActiveHigh').checked
+      });
+      toast('Реле сохранено');
+    }
+    async function controlDevice(device, state) {
+      try {
+        if (DEMO) { toast(device + ' = ' + state); return; }
+        await api('/api/control?device=' + device + '&state=' + state, { method: 'POST' });
+        toast('Команда отправлена');
+      } catch (e) { toast('Ошибка управления'); }
+    }
+    async function checkUpdates() {
+      try {
+        const c = await api('/api/update/check');
+        $('updCurrent').textContent = c.currentVersion || '--';
+        $('updLatest').textContent = c.latestVersion || '--';
+        $('updStatus').textContent = c.updateAvailable ? 'Доступно обновление' : (c.error || 'Актуально');
+      } catch (e) { toast('Проверка недоступна'); }
+    }
+    async function installUpdate() {
+      if (!confirm('Установить обновление канала v45?')) return;
+      try { await api('/api/update/install', { method: 'POST' }); toast('Запрос отправлен'); }
+      catch (e) { toast('Установка недоступна'); }
+    }
+    async function saveUpdateSettings() {
+      await postJson('/api/update/settings', {
+        autoCheck: $('autoCheckEnabled').checked,
+        checkIntervalHours: Number($('checkInterval').value || 24)
+      });
+      toast('Сохранено');
+    }
+    async function saveTunnelSettings() {
+      await postJson('/api/tunnel/settings', {
+        enabled: $('tunnelEnabled').checked,
+        server: $('tunnelVpsHost').value,
+        port: Number($('tunnelVpsPort').value || 7000),
+        token: $('tunnelAuthToken').value
+      });
+      toast('Туннель сохранён');
+    }
+    async function saveVpsSettings() {
+      await postJson('/api/vps/settings', {
+        baseUrl: $('vpsBaseUrl').value,
+        token: $('vpsToken').value
+      });
+      toast('VPS сохранено');
+    }
+    async function rebootDevice() {
+      if (!confirm('Перезагрузить контроллер?')) return;
+      try { await api('/api/system/reboot', { method: 'POST' }); toast('Перезагрузка…'); }
+      catch (e) { toast('Ошибка'); }
+    }
+    async function resetBootCount() {
+      try { await api('/api/system/bootcount/reset', { method: 'POST' }); loadSettings('log'); }
+      catch (e) { toast('Ошибка'); }
+    }
+    async function sendUserEvent() {
+      const text = $('eventText').value.trim();
+      if (!text) return toast('Введите текст');
+      await postJson('/api/events/user', { text });
+      $('eventText').value = '';
+      toast('Событие отправлено');
+      loadSettings('events');
+    }
+
+    $('systemEnabled').addEventListener('change', toggleSystem);
+    $('coalBtn').addEventListener('click', startCoal);
+    $('btnMenu').addEventListener('click', openDrawer);
+    $('drawerClose').addEventListener('click', closeDrawer);
+    $('drawerBackdrop').addEventListener('click', closeDrawer);
+    $('modeCard').addEventListener('click', () => {
+      $('modeSheet').classList.add('open');
+      $('modeSheetBg').classList.add('open');
+    });
+    $('modeSheetBg').addEventListener('click', () => {
+      $('modeSheet').classList.remove('open');
+      $('modeSheetBg').classList.remove('open');
+    });
+    document.querySelectorAll('#modeSheet .opt').forEach(btn => {
+      btn.addEventListener('click', () => {
+        setMode(Number(btn.dataset.mode));
+        $('modeSheet').classList.remove('open');
+        $('modeSheetBg').classList.remove('open');
+      });
+    });
+
+    if (DEMO) toast('Demo-режим (?demo=1)');
+    updateData();
+    pollTimer = setInterval(updateData, 3000);
+  
+  </script>
+</body>
+</html>
