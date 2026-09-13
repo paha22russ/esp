@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Kotel Local</string>
+    <string name="searching">Поиск ESP котла...</string>
+    <string name="retry">Перепоиск</string>
+    <string name="refresh">Обновить</string>
+    <string name="open">Открыть</string>
+    <string name="manual_url_hint">http://192.168.x.x</string>
+    <string name="not_found">ESP-котел не найден</string>
+    <string name="connected_to">Подключено: %1$s</string>
+</resources>
