@@ -1122,6 +1122,7 @@
                             <strong>📥 Подписка (принимает команды):</strong><br>
                             • <code class="mqtt-topic" id="mqttTopicSetpointSet" style="color: #27AE60; font-weight: bold; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/setpoint/set</code> - <strong>изменить уставку</strong><br>
                             • <code class="mqtt-topic" id="mqttTopicSystemSet" style="color: #27AE60; font-weight: bold; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/system/set</code> - <strong>вкл/выкл системы</strong> (1/0, on/off)<br>
+                            • <code class="mqtt-topic" id="mqttTopicSystemSetAlt" style="color: #27AE60; font-weight: bold; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/simple/enabled/set</code> - вкл/выкл (альтернатива)<br>
                             • <code class="mqtt-topic" id="mqttTopicSensorsReset" style="color: #27AE60; font-weight: bold; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/sensors/reset</code> - <strong>сброс датчиков</strong><br>
                             <small style="display: block; margin-top: 5px; opacity: 0.8;">
                                 Выключение системы: вентилятор сразу стоп, насос работает пока подача не стабилизируется (мин. 2 мин, макс. 45 мин). Рост подачи в любом режиме снова включает насос.
@@ -3690,6 +3691,7 @@
                 'mqttTopicCoalFeeding': prefixValue + '/coalFeeding',
                 'mqttTopicSetpointSet': prefixValue + '/setpoint/set',
                 'mqttTopicSystemSet': prefixValue + '/system/set',
+                'mqttTopicSystemSetAlt': prefixValue + '/simple/enabled/set',
                 'mqttTopicSensorsReset': prefixValue + '/sensors/reset'
             };
             

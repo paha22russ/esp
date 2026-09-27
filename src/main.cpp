@@ -46,7 +46,7 @@
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.24"
+#define FIRMWARE_VERSION "4.2.25"
 
 // GitHub репозиторий для обновлений
 #define GITHUB_REPO_OWNER "paha22russ"
@@ -144,6 +144,7 @@ const unsigned long PUMP_COAST_MIN_MS = 2UL * 60UL * 1000UL;   // минимум
 const unsigned long PUMP_COAST_MAX_MS = 45UL * 60UL * 1000UL;  // максимум 45 мин
 const unsigned long PUMP_STABLE_HOLD_MS = 3UL * 60UL * 1000UL; // стабильный тренд держать 3 мин
 const float PUMP_RISE_GUARD_MIN_TEMP = 30.0;  // защита по росту подачи выше этой t°
+bool systemEnabledMqttPending = false;  // отложенная публикация (не из mqttCallback)
 
 // Константы для обнаружения прогорания угля
 const unsigned long COAL_BURNED_CHECK_TIME = 10 * 60 * 1000;  // 10 минут в миллисекундах
@@ -429,6 +430,8 @@ void applySystemEnable(bool enable, const char* source);
 void startPumpCoast(const char* reason);
 void updatePumpLogic(unsigned long now);
 void publishSystemEnabledMqtt();
+void queueSystemEnabledMqtt();
+bool parseMqttOnOff(const String& message, bool& enableOut);
 void handleTunnelSettingsGet();
 void handleTunnelSettingsPost();
 void handleTunnelFrpcConfig();
@@ -1853,7 +1856,7 @@ void startIgnition() {
       String topic = mqttSettings.prefix + "/event/boiler_ignition_started";
       mqttClient.publish(topic.c_str(), details, false);
     }
-    publishSystemEnabledMqtt();
+    queueSystemEnabledMqtt();
     
     Serial.println("[Котел] Розжиг начат");
   }
@@ -2056,15 +2059,42 @@ String getFormattedDate() {
   return String(dateStr);
 }
 
-// Публикация статуса системы в MQTT
+// Публикация статуса системы в MQTT (вызывать вне mqttCallback)
 void publishSystemEnabledMqtt() {
   if (!mqttSettings.enabled || !mqttClient.connected()) {
     return;
   }
+  const char* payload = systemEnabled ? "1" : "0";
   String enabledTopic = mqttSettings.prefix + "/simple/enabled";
-  mqttClient.publish(enabledTopic.c_str(), systemEnabled ? "1" : "0", true);  // retain
+  mqttClient.publish(enabledTopic.c_str(), payload, true);  // retain
   String systemTopic = mqttSettings.prefix + "/system";
-  mqttClient.publish(systemTopic.c_str(), systemEnabled ? "1" : "0", true);
+  mqttClient.publish(systemTopic.c_str(), payload, true);
+  systemEnabledMqttPending = false;
+  Serial.print("[MQTT] systemEnabled published: ");
+  Serial.println(payload);
+}
+
+// Отложенная публикация: PubSubClient нельзя надёжно publish() из mqttCallback
+void queueSystemEnabledMqtt() {
+  systemEnabledMqttPending = true;
+}
+
+// Разбор команд вкл/выкл от wqtt и др.
+bool parseMqttOnOff(const String& message, bool& enableOut) {
+  String cmd = message;
+  cmd.trim();
+  cmd.replace("\"", "");
+  cmd.replace("'", "");
+  cmd.toLowerCase();
+  if (cmd == "1" || cmd == "on" || cmd == "enable" || cmd == "true" || cmd == "yes") {
+    enableOut = true;
+    return true;
+  }
+  if (cmd == "0" || cmd == "off" || cmd == "disable" || cmd == "false" || cmd == "no") {
+    enableOut = false;
+    return true;
+  }
+  return false;
 }
 
 // Запуск выбега насоса после выключения / при росте температуры
@@ -2087,7 +2117,7 @@ void applySystemEnable(bool enable, const char* source) {
       Serial.print(src);
       Serial.println(") при погасании → розжиг");
       startIgnition();
-      publishSystemEnabledMqtt();
+      queueSystemEnabledMqtt();
       return;
     }
     
@@ -2096,7 +2126,7 @@ void applySystemEnable(bool enable, const char* source) {
     pumpCoastStartTime = 0;
     pumpStableSince = 0;
     saveSystemEnabledToEEPROM();
-    publishSystemEnabledMqtt();
+    queueSystemEnabledMqtt();
     Serial.print("[Система] Включена (");
     Serial.print(src);
     Serial.println(")");
@@ -2139,7 +2169,7 @@ void applySystemEnable(bool enable, const char* source) {
     digitalWrite(PIN_RELAY_PUMP, relaySettings.pumpOffIsLow ? LOW : HIGH);
   }
   
-  publishSystemEnabledMqtt();
+  queueSystemEnabledMqtt();
   Serial.print("[Система] Выключена (");
   Serial.print(src);
   Serial.print("), выбег насоса: ");
@@ -2364,18 +2394,17 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
   }
   
-  // Вкл/выкл системы: {prefix}/system/set  → 1/0/on/off/enable/disable
+  // Вкл/выкл системы:
+  //   {prefix}/system/set
+  //   {prefix}/simple/enabled/set  (как у уставки: simple/... + /set)
   String systemSetTopic = mqttSettings.prefix + "/system/set";
-  if (topicStr == systemSetTopic) {
-    String cmd = message;
-    cmd.toLowerCase();
-    cmd.trim();
-    if (cmd == "1" || cmd == "on" || cmd == "enable" || cmd == "true") {
-      applySystemEnable(true, "mqtt");
-      Serial.println("[MQTT] System ON");
-    } else if (cmd == "0" || cmd == "off" || cmd == "disable" || cmd == "false") {
-      applySystemEnable(false, "mqtt");
-      Serial.println("[MQTT] System OFF (soft stop + pump coast)");
+  String systemSetTopicAlt = mqttSettings.prefix + "/simple/enabled/set";
+  if (topicStr == systemSetTopic || topicStr == systemSetTopicAlt) {
+    bool enable = false;
+    if (parseMqttOnOff(message, enable)) {
+      applySystemEnable(enable, "mqtt");
+      Serial.print("[MQTT] System ");
+      Serial.println(enable ? "ON" : "OFF");
     } else {
       Serial.print("[MQTT] System set: unknown payload: ");
       Serial.println(message);
@@ -2439,6 +2468,8 @@ bool mqttConnect() {
     // Подписка на вкл/выкл системы
     String systemSetTopic = mqttSettings.prefix + "/system/set";
     mqttClient.subscribe(systemSetTopic.c_str());
+    String systemSetTopicAlt = mqttSettings.prefix + "/simple/enabled/set";
+    mqttClient.subscribe(systemSetTopicAlt.c_str());
     
     // Подписка на температуру в доме от ESP01
     mqttClient.subscribe("home/esp01/temperature");
@@ -2446,7 +2477,8 @@ bool mqttConnect() {
     // Подписка на LWT статус датчика температуры дома
     mqttClient.subscribe("home/esp01/status");
     
-    // Актуальный статус системы (retain)
+    // Актуальный статус системы (retain) — после callback-цикла тоже продублируем флагом
+    queueSystemEnabledMqtt();
     publishSystemEnabledMqtt();
     
     // Проверка режима работы после подключения к MQTT
@@ -2531,8 +2563,8 @@ void publishMqttSimple() {
     mqttClient.publish(homeTempTopic.c_str(), String(homeTemp, 1).c_str(), false);
   }
   
-  // Публикация состояния системы
-  mqttClient.publish(enabledTopic.c_str(), systemEnabled ? "1" : "0", false);
+  // Публикация состояния системы (retain — чтобы wqtt не откатывал переключатель)
+  mqttClient.publish(enabledTopic.c_str(), systemEnabled ? "1" : "0", true);
   mqttClient.publish(setpointTopic.c_str(), String(setpoint, 1).c_str(), false);
   
   // Публикация режима работы (0 = Авто, 1 = Комфорт)
@@ -5999,6 +6031,10 @@ void loop() {
     } else {
       // loop() не должен блокировать, но ограничим время
       mqttClient.loop();
+      // Публикация статуса системы после обработки входящих команд (не из callback)
+      if (systemEnabledMqttPending) {
+        publishSystemEnabledMqtt();
+      }
     }
   }
   
