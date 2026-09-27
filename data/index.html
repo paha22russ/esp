@@ -1121,9 +1121,10 @@
                         <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-color);">
                             <strong>📥 Подписка (принимает команды):</strong><br>
                             • <code class="mqtt-topic" id="mqttTopicSetpointSet" style="color: #27AE60; font-weight: bold; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/setpoint/set</code> - <strong>изменить уставку</strong><br>
+                            • <code class="mqtt-topic" id="mqttTopicSystemSet" style="color: #27AE60; font-weight: bold; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/system/set</code> - <strong>вкл/выкл системы</strong> (1/0, on/off)<br>
                             • <code class="mqtt-topic" id="mqttTopicSensorsReset" style="color: #27AE60; font-weight: bold; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/sensors/reset</code> - <strong>сброс датчиков</strong><br>
                             <small style="display: block; margin-top: 5px; opacity: 0.8;">
-                                Кликните на топик для копирования в буфер обмена
+                                Выключение системы: вентилятор сразу стоп, насос работает пока подача не стабилизируется (мин. 2 мин, макс. 45 мин). Рост подачи в любом режиме снова включает насос.
                             </small>
                         </div>
                     </div>
@@ -2035,10 +2036,22 @@
             fetch('/api/system/enable?enabled=' + (enabled ? 1 : 0), { method: 'POST' })
                 .then(r => r.json())
                 .then(d => {
-                    updateSystemStatus(enabled);
-                    console.log('System control:', d);
+                    if (d.systemEnabled !== undefined) {
+                        checkbox.checked = !!d.systemEnabled;
+                        updateSystemStatus(!!d.systemEnabled);
+                    } else {
+                        updateSystemStatus(enabled);
+                    }
+                    if (d.message) {
+                        console.log('System control:', d.message);
+                    }
+                    // Сразу обновим статус (розжиг / погасание)
+                    setTimeout(updateData, 300);
                 })
-                .catch(e => console.error('Error:', e));
+                .catch(e => {
+                    console.error('Error:', e);
+                    checkbox.checked = !enabled;
+                });
         }
 
         function updateSystemStatus(enabled) {
@@ -2233,22 +2246,34 @@
                     // Определение статуса работы системы
                     let statusText = 'Работа';
                     let statusClass = 'success';
+                    const isExtinguished = d.boilerExtinguished === true ||
+                        d.state === 'КОТЕЛ_ПОГАС' || d.state === 'ОШИБКА_РОЗЖИГА';
                     
-                    if (d.systemEnabled === false) {
-                        statusText = 'Остановлена';
+                    if (isExtinguished) {
+                        statusText = (d.state === 'ОШИБКА_РОЗЖИГА') ? 'Ошибка розжига' : 'Котел погас';
                         statusClass = 'warning';
-                    } else if (d.supplyTemp >= 77) {
-                        statusText = 'Перегрев!';
-                        statusClass = 'danger';
-                    } else if (d.coalFeeding === true) {
-                        statusText = 'Подброс угля';
-                        statusClass = 'info';
-                    } else if (d.fan === true || d.pump === true) {
-                        statusText = 'Работа';
-                        statusClass = 'success';
+                        document.body.classList.add('extinguishing');
                     } else {
-                        statusText = 'Ожидание';
-                        statusClass = 'idle';
+                        document.body.classList.remove('extinguishing');
+                        if (d.systemEnabled === false) {
+                            statusText = 'Остановлена';
+                            statusClass = 'warning';
+                        } else if (d.state === 'РОЗЖИГ' || d.ignitionInProgress === true) {
+                            statusText = 'Розжиг';
+                            statusClass = 'info';
+                        } else if (d.supplyTemp >= 77) {
+                            statusText = 'Перегрев!';
+                            statusClass = 'danger';
+                        } else if (d.coalFeeding === true) {
+                            statusText = 'Подброс угля';
+                            statusClass = 'info';
+                        } else if (d.fan === true || d.pump === true) {
+                            statusText = 'Работа';
+                            statusClass = 'success';
+                        } else {
+                            statusText = 'Ожидание';
+                            statusClass = 'idle';
+                        }
                     }
                     
                     document.getElementById('stateDisplay').textContent = statusText;
@@ -2305,6 +2330,9 @@
                             'COAL_BURNED': 'Уголь прогорел',
                             'OVERHEAT': 'Перегрев',
                             'HIGH_TEMP': 'Высокая температура',
+                            'КОТЕЛ_ПОГАС': 'Котел погас',
+                            'РОЗЖИГ': 'Розжиг',
+                            'ОШИБКА_РОЗЖИГА': 'Ошибка розжига',
                             'Ожидание': 'Ожидание',
                             'Разогрев 1': 'Разогрев 1',
                             'Ожидание охлаждения': 'Ожидание охлаждения',
@@ -2346,11 +2374,12 @@
                         
                         // Цвет в зависимости от режима
                         if (stateForColor === 'HEATING' || stateForColor === 'HEATING_1' || stateForColor === 'HEATING_2' || 
-                            stateForColor === 'Разогрев 1' || stateForColor === 'Разогрев 2') {
+                            stateForColor === 'Разогрев 1' || stateForColor === 'Разогрев 2' || stateForColor === 'РОЗЖИГ') {
                             systemModeText.style.color = '#00ff00';
                         } else if (stateForColor === 'OVERHEAT' || stateForColor === 'HIGH_TEMP') {
                             systemModeText.style.color = '#ff0000';
-                        } else if (stateForColor === 'COAL_BURNED' || stateForColor === 'HEATING_TIMEOUT') {
+                        } else if (stateForColor === 'COAL_BURNED' || stateForColor === 'HEATING_TIMEOUT' ||
+                                   stateForColor === 'КОТЕЛ_ПОГАС' || stateForColor === 'ОШИБКА_РОЗЖИГА') {
                             systemModeText.style.color = '#ffaa00';
                         } else if (stateForColor === 'COMFORT' || stateForColor === 'MAINTAIN' || 
                                    stateForColor === 'Комфорт' || stateForColor === 'Поддержание') {
@@ -3660,6 +3689,7 @@
                 'mqttTopicState': prefixValue + '/state',
                 'mqttTopicCoalFeeding': prefixValue + '/coalFeeding',
                 'mqttTopicSetpointSet': prefixValue + '/setpoint/set',
+                'mqttTopicSystemSet': prefixValue + '/system/set',
                 'mqttTopicSensorsReset': prefixValue + '/sensors/reset'
             };
             

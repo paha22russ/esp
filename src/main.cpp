@@ -46,7 +46,7 @@
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.22"
+#define FIRMWARE_VERSION "4.2.24"
 
 // GitHub репозиторий для обновлений
 #define GITHUB_REPO_OWNER "paha22russ"
@@ -135,6 +135,15 @@ const int TEMP_TREND_SAMPLES = 10;  // Количество значений д�
 // Константы для защиты от застоя насоса
 const unsigned long PUMP_ANTI_STAGNATION_INTERVAL = 30 * 60 * 1000;  // 30 минут в миллисекундах
 const unsigned long PUMP_ANTI_STAGNATION_DURATION = 2 * 60 * 1000;   // 2 минуты в миллисекундах
+
+// Выбег насоса после выключения системы (пока подача не стабилизируется)
+bool pumpCoastActive = false;
+unsigned long pumpCoastStartTime = 0;
+unsigned long pumpStableSince = 0;
+const unsigned long PUMP_COAST_MIN_MS = 2UL * 60UL * 1000UL;   // минимум 2 мин после выкл
+const unsigned long PUMP_COAST_MAX_MS = 45UL * 60UL * 1000UL;  // максимум 45 мин
+const unsigned long PUMP_STABLE_HOLD_MS = 3UL * 60UL * 1000UL; // стабильный тренд держать 3 мин
+const float PUMP_RISE_GUARD_MIN_TEMP = 30.0;  // защита по росту подачи выше этой t°
 
 // Константы для обнаружения прогорания угля
 const unsigned long COAL_BURNED_CHECK_TIME = 10 * 60 * 1000;  // 10 минут в миллисекундах
@@ -416,6 +425,10 @@ void loadFanStatsFromEEPROM();
 void startIgnition();
 void checkBoilerExtinguished(unsigned long now);
 void checkIgnitionProgress(unsigned long now);
+void applySystemEnable(bool enable, const char* source);
+void startPumpCoast(const char* reason);
+void updatePumpLogic(unsigned long now);
+void publishSystemEnabledMqtt();
 void handleTunnelSettingsGet();
 void handleTunnelSettingsPost();
 void handleTunnelFrpcConfig();
@@ -485,6 +498,8 @@ void IRAM_ATTR encoderISR() {
 // Обновление дисплея OLED
 void updateDisplay() {
   u8g2.clearBuffer();
+  unsigned long now = millis();
+  bool extinguishedScreen = boilerExtinguished || systemState == "КОТЕЛ_ПОГАС" || systemState == "ОШИБКА_РОЗЖИГА";
   
   // Температура подачи (крупным шрифтом)
   u8g2.setFont(u8g2_font_ncenB18_tr);
@@ -494,7 +509,27 @@ void updateDisplay() {
   } else {
     strcpy(tempStr, "--°C");
   }
-  u8g2.drawStr(0, 25, tempStr);
+  u8g2.drawStr(0, 22, tempStr);
+  
+  if (extinguishedScreen) {
+    // Мигание статуса погасания (~2 раза/сек)
+    bool blinkOn = ((now / 400) % 2) == 0;
+    if (blinkOn) {
+      u8g2.setFont(u8g2_font_6x12_t_cyrillic);
+      if (systemState == "ОШИБКА_РОЗЖИГА") {
+        u8g2.drawUTF8(0, 40, "ОШИБКА РОЗЖИГА");
+      } else {
+        u8g2.drawUTF8(0, 40, "КОТЕЛ ПОГАС");
+      }
+    }
+    // Подсказка: нажмите энкодер для розжига
+    u8g2.setFont(u8g2_font_5x8_t_cyrillic);
+    u8g2.drawUTF8(0, 54, "Нажмите для старта");
+    u8g2.setFont(u8g2_font_5x8_t_cyrillic);
+    u8g2.drawUTF8(0, 64, systemEnabled ? "Система ВКЛ" : "Система ВЫКЛ");
+    u8g2.sendBuffer();
+    return;
+  }
   
   // Уставка (меньшим шрифтом)
   u8g2.setFont(u8g2_font_ncenB10_tr);
@@ -502,28 +537,21 @@ void updateDisplay() {
   snprintf(setpointStr, sizeof(setpointStr), "Уст: %.1f°C", setpoint);
   u8g2.drawStr(0, 40, setpointStr);
   
-  // Статус подброса угля (если активен) или текущее время или состояние погасания/розжига
-  if (boilerExtinguished || systemState == "КОТЕЛ_ПОГАС") {
+  // Статус подброса угля / розжига / время
+  if (ignitionInProgress || systemState == "РОЗЖИГ") {
     u8g2.setFont(u8g2_font_ncenB10_tr);
-    u8g2.drawStr(0, 55, "КОТЕЛ ПОГАС");
-  } else if (ignitionInProgress || systemState == "РОЗЖИГ") {
-    u8g2.setFont(u8g2_font_ncenB10_tr);
-    unsigned long elapsed = (millis() >= ignitionStartTime) ? (millis() - ignitionStartTime) : (ULONG_MAX - ignitionStartTime + millis());
+    unsigned long elapsed = (now >= ignitionStartTime) ? (now - ignitionStartTime) : (ULONG_MAX - ignitionStartTime + now);
     char ignitionStr[20];
     snprintf(ignitionStr, sizeof(ignitionStr), "РОЗЖИГ %luм", elapsed / 60000);
     u8g2.drawStr(0, 55, ignitionStr);
-  } else if (systemState == "ОШИБКА_РОЗЖИГА") {
-    u8g2.setFont(u8g2_font_ncenB10_tr);
-    u8g2.drawStr(0, 55, "ОШИБКА РОЗЖИГА");
   } else if (coalFeedingActive) {
-    int remaining = getCoalFeedingRemainingSeconds(); // Оставшееся время
+    int remaining = getCoalFeedingRemainingSeconds();
     int minutes = remaining / 60;
     int seconds = remaining % 60;
     char coalStr[20];
     snprintf(coalStr, sizeof(coalStr), "Уголь: %02d:%02d", minutes, seconds);
     u8g2.drawStr(0, 55, coalStr);
   } else {
-    // Показываем текущее время с секундами, если нет подброса угля
     if (ntpSettings.enabled && timeClient.isTimeSet()) {
       timeClient.update();
       unsigned long epochTime = timeClient.getEpochTime();
@@ -531,20 +559,17 @@ void updateDisplay() {
       struct tm *timeinfo = localtime(&rawTime);
       if (timeinfo != NULL) {
         char timeStr[20];
-        snprintf(timeStr, sizeof(timeStr), "%02d:%02d:%02d", 
+        snprintf(timeStr, sizeof(timeStr), "%02d:%02d:%02d",
                  timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
         u8g2.drawStr(0, 55, timeStr);
       }
     }
   }
-  // Загрузка CPU убрана с дисплея
   
   // Нижняя строка: состояние системы и активный таймер
   u8g2.setFont(u8g2_font_6x10_tr);
   String bottomLine = "";
-  unsigned long now = millis();
   
-  // Определяем активный таймер для отображения
   if (ignitionInProgress && ignitionStartTime > 0) {
     unsigned long elapsed = (now >= ignitionStartTime) ? (now - ignitionStartTime) : (ULONG_MAX - ignitionStartTime + now);
     unsigned long minutes = elapsed / 60000;
@@ -568,13 +593,9 @@ void updateDisplay() {
     snprintf(timerStr, sizeof(timerStr), "Вент:%lu:%02lu", minutes, seconds);
     bottomLine = String(timerStr);
   } else {
-    // Показываем состояние системы
     if (systemState.length() > 0) {
-      // Сокращаем длинные состояния
       String stateDisplay = systemState;
-      if (stateDisplay == "КОТЕЛ_ПОГАС") stateDisplay = "ПОГАС";
-      else if (stateDisplay == "ОШИБКА_РОЗЖИГА") stateDisplay = "ОШИБКА";
-      else if (stateDisplay == "HEATING_TIMEOUT") stateDisplay = "ТАЙМАУТ";
+      if (stateDisplay == "HEATING_TIMEOUT") stateDisplay = "ТАЙМАУТ";
       else if (stateDisplay == "COAL_BURNED") stateDisplay = "ПРОГОРЕЛ";
       else if (stateDisplay == "HIGH_TEMP") stateDisplay = "ВЫСОКАЯ";
       bottomLine = stateDisplay;
@@ -583,7 +604,6 @@ void updateDisplay() {
     }
   }
   
-  // Обрезаем строку если слишком длинная (максимум 16 символов для дисплея)
   if (bottomLine.length() > 16) {
     bottomLine = bottomLine.substring(0, 16);
   }
@@ -1808,8 +1828,13 @@ void loadFanStatsFromEEPROM() {
 
 // Функция запуска розжига
 void startIgnition() {
-  if (boilerExtinguished || systemState == "КОТЕЛ_ПОГАС") {
+  if (boilerExtinguished || systemState == "КОТЕЛ_ПОГАС" || systemState == "ОШИБКА_РОЗЖИГА") {
     boilerExtinguished = false;
+    systemEnabled = true;
+    pumpCoastActive = false;
+    pumpCoastStartTime = 0;
+    pumpStableSince = 0;
+    saveSystemEnabledToEEPROM();
     ignitionInProgress = true;
     ignitionStartTime = millis();
     ignitionStartTemp = supplyTemp;
@@ -1828,8 +1853,9 @@ void startIgnition() {
       String topic = mqttSettings.prefix + "/event/boiler_ignition_started";
       mqttClient.publish(topic.c_str(), details, false);
     }
+    publishSystemEnabledMqtt();
     
-    Serial.println("[Котел] Розжиг начат по нажатию кнопки");
+    Serial.println("[Котел] Розжиг начат");
   }
 }
 
@@ -1879,7 +1905,10 @@ void checkBoilerExtinguished(unsigned long now) {
           mqttClient.publish(topic.c_str(), details, false);
         }
         
-        Serial.print("[Котел] Обнаружено погасание! Вентилятор отключен. Падение температуры: ");
+        // Мягкое выключение: вентилятор стоп, насос на выбеге до стабилизации
+        applySystemEnable(false, "extinguished");
+        
+        Serial.print("[Котел] Обнаружено погасание! Падение температуры: ");
         Serial.print(tempDrop);
         Serial.println("°C");
       }
@@ -1941,6 +1970,8 @@ void checkIgnitionProgress(unsigned long now) {
       String topic = mqttSettings.prefix + "/event/boiler_ignition_failed";
       mqttClient.publish(topic.c_str(), details, false);
     }
+    
+    applySystemEnable(false, "ignition_failed");
     
     Serial.print("[Котел] Розжиг неудачен! Таймаут. Температура повысилась только на ");
     Serial.print(tempIncrease);
@@ -2025,6 +2056,231 @@ String getFormattedDate() {
   return String(dateStr);
 }
 
+// Публикация статуса системы в MQTT
+void publishSystemEnabledMqtt() {
+  if (!mqttSettings.enabled || !mqttClient.connected()) {
+    return;
+  }
+  String enabledTopic = mqttSettings.prefix + "/simple/enabled";
+  mqttClient.publish(enabledTopic.c_str(), systemEnabled ? "1" : "0", true);  // retain
+  String systemTopic = mqttSettings.prefix + "/system";
+  mqttClient.publish(systemTopic.c_str(), systemEnabled ? "1" : "0", true);
+}
+
+// Запуск выбега насоса после выключения / при росте температуры
+void startPumpCoast(const char* reason) {
+  pumpCoastActive = true;
+  pumpCoastStartTime = millis();
+  pumpStableSince = 0;
+  pumpState = true;
+  Serial.print("[Насос] Выбег/защита: ");
+  Serial.println(reason ? reason : "start");
+}
+
+// Включение/выключение системы (веб, MQTT, погасание)
+void applySystemEnable(bool enable, const char* source) {
+  const char* src = source ? source : "unknown";
+  
+  if (enable) {
+    if (boilerExtinguished || systemState == "КОТЕЛ_ПОГАС" || systemState == "ОШИБКА_РОЗЖИГА") {
+      Serial.print("[Система] Вкл (");
+      Serial.print(src);
+      Serial.println(") при погасании → розжиг");
+      startIgnition();
+      publishSystemEnabledMqtt();
+      return;
+    }
+    
+    systemEnabled = true;
+    pumpCoastActive = false;
+    pumpCoastStartTime = 0;
+    pumpStableSince = 0;
+    saveSystemEnabledToEEPROM();
+    publishSystemEnabledMqtt();
+    Serial.print("[Система] Включена (");
+    Serial.print(src);
+    Serial.println(")");
+    return;
+  }
+  
+  // --- Выключение (мягкое): вентилятор стоп, насос выбегает до стабилизации подачи ---
+  bool wasEnabled = systemEnabled;
+  bool needCoast = wasEnabled && (
+      fanState ||
+      pumpState ||
+      ignitionInProgress ||
+      (supplyTemp >= autoSettings.minTemp) ||
+      systemState == "HEATING" ||
+      systemState == "РОЗЖИГ" ||
+      systemState == "HIGH_TEMP"
+  );
+  
+  systemEnabled = false;
+  fanState = false;
+  digitalWrite(PIN_RELAY_FAN, relaySettings.fanOffIsLow ? LOW : HIGH);
+  
+  // Останавливаем розжиг/подброс, но не сбрасываем историю трендов
+  ignitionInProgress = false;
+  ignitionStartTime = 0;
+  coalFeedingActive = false;
+  heatingStartTime = 0;
+  fanStartTime = 0;
+  maxTempDuringFan = 0.0;
+  
+  saveSystemEnabledToEEPROM();
+  
+  if (needCoast || (supplyTemp >= PUMP_RISE_GUARD_MIN_TEMP && getTemperatureTrend(&supplyHistory) != 0)) {
+    startPumpCoast(src);
+  } else {
+    pumpCoastActive = false;
+    pumpCoastStartTime = 0;
+    pumpStableSince = 0;
+    pumpState = false;
+    digitalWrite(PIN_RELAY_PUMP, relaySettings.pumpOffIsLow ? LOW : HIGH);
+  }
+  
+  publishSystemEnabledMqtt();
+  Serial.print("[Система] Выключена (");
+  Serial.print(src);
+  Serial.print("), выбег насоса: ");
+  Serial.println(pumpCoastActive ? "да" : "нет");
+}
+
+// Логика насоса: обычный режим + выбег после выкл + защита при росте подачи
+void updatePumpLogic(unsigned long now) {
+  if (manualPumpControl) {
+    return;
+  }
+  
+  int supplyTrend = getTemperatureTrend(&supplyHistory);
+  bool supplyValid = (supplyTemp > 0);
+  bool riseGuard = supplyValid && supplyTemp >= PUMP_RISE_GUARD_MIN_TEMP && supplyTrend == 1;
+  
+  // В любом состоянии: рост подачи → насос обязателен (тлеющий котёл разгорелся)
+  if (riseGuard) {
+    if (!pumpState || !pumpCoastActive) {
+      startPumpCoast("рост подачи");
+    } else {
+      pumpStableSince = 0;
+      pumpState = true;
+    }
+  }
+  
+  if (systemEnabled) {
+    bool shouldPumpRun = false;
+    
+    bool outdoorTempValid = (outdoorTemp > -50.0 && outdoorTemp < 150.0);
+    bool outdoorTempBelowZero = outdoorTempValid && outdoorTemp < 0.0;
+    
+    if (supplyValid) {
+      if (!outdoorTempValid || outdoorTempBelowZero) {
+        shouldPumpRun = true;
+      } else {
+        if (fanState) {
+          shouldPumpRun = true;
+        } else if (supplyTemp >= autoSettings.minTemp) {
+          shouldPumpRun = true;
+        }
+      }
+    } else {
+      shouldPumpRun = true;
+    }
+    
+    if (riseGuard) {
+      shouldPumpRun = true;
+    }
+    
+    // Защита от застоя
+    if (!shouldPumpRun && !pumpState) {
+      unsigned long timeSinceLastRun = (now >= lastPumpRunTime) ? (now - lastPumpRunTime) : (ULONG_MAX - lastPumpRunTime + now);
+      if (timeSinceLastRun > PUMP_ANTI_STAGNATION_INTERVAL) {
+        shouldPumpRun = true;
+        lastPumpRunTime = now;
+      }
+    }
+    
+    if (shouldPumpRun && !pumpState) {
+      pumpState = true;
+      lastPumpRunTime = now;
+    } else if (!shouldPumpRun && pumpState) {
+      unsigned long pumpRunTime = (now >= lastPumpRunTime) ? (now - lastPumpRunTime) : (ULONG_MAX - lastPumpRunTime + now);
+      if (pumpRunTime < PUMP_ANTI_STAGNATION_DURATION) {
+        // антизастой — ещё держим
+      } else if (riseGuard) {
+        pumpState = true;
+      } else {
+        pumpState = false;
+      }
+    }
+    
+    // При включённой системе выбег не нужен
+    if (pumpCoastActive && !riseGuard) {
+      pumpCoastActive = false;
+      pumpCoastStartTime = 0;
+      pumpStableSince = 0;
+    }
+    return;
+  }
+  
+  // --- Система выключена ---
+  bool shouldPumpRun = false;
+  bool outdoorTempValid = (outdoorTemp > -50.0 && outdoorTemp < 150.0);
+  bool outdoorTempBelowZero = outdoorTempValid && outdoorTemp < 0.0;
+  
+  // Антизамерзание контура при морозе — даже если система выкл
+  if (outdoorTempBelowZero) {
+    shouldPumpRun = true;
+  }
+  
+  if (riseGuard) {
+    shouldPumpRun = true;
+  }
+  
+  if (pumpCoastActive) {
+    unsigned long coastElapsed = (now >= pumpCoastStartTime)
+      ? (now - pumpCoastStartTime)
+      : (ULONG_MAX - pumpCoastStartTime + now);
+    
+    if (coastElapsed >= PUMP_COAST_MAX_MS && !riseGuard && !outdoorTempBelowZero) {
+      pumpCoastActive = false;
+      pumpStableSince = 0;
+      Serial.println("[Насос] Выбег: достигнут максимум, останавливаем");
+    } else {
+      shouldPumpRun = true;
+      
+      if (!riseGuard && supplyTrend == 0) {
+        if (pumpStableSince == 0) {
+          pumpStableSince = now;
+        } else {
+          unsigned long stableElapsed = (now >= pumpStableSince)
+            ? (now - pumpStableSince)
+            : (ULONG_MAX - pumpStableSince + now);
+          if (stableElapsed >= PUMP_STABLE_HOLD_MS && coastElapsed >= PUMP_COAST_MIN_MS) {
+            pumpCoastActive = false;
+            pumpStableSince = 0;
+            if (!outdoorTempBelowZero && !riseGuard) {
+              shouldPumpRun = false;
+            }
+            Serial.println("[Насос] Выбег: подача стабильна, останавливаем");
+          }
+        }
+      } else if (supplyTrend != 0) {
+        // Ещё падает или растёт — ждём стабилизации
+        pumpStableSince = 0;
+      }
+    }
+  }
+  
+  if (shouldPumpRun) {
+    if (!pumpState) {
+      lastPumpRunTime = now;
+    }
+    pumpState = true;
+  } else {
+    pumpState = false;
+  }
+}
+
 // MQTT функции
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String topicStr = String(topic);
@@ -2107,6 +2363,24 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       Serial.println("[MQTT] Ignition start command received");
     }
   }
+  
+  // Вкл/выкл системы: {prefix}/system/set  → 1/0/on/off/enable/disable
+  String systemSetTopic = mqttSettings.prefix + "/system/set";
+  if (topicStr == systemSetTopic) {
+    String cmd = message;
+    cmd.toLowerCase();
+    cmd.trim();
+    if (cmd == "1" || cmd == "on" || cmd == "enable" || cmd == "true") {
+      applySystemEnable(true, "mqtt");
+      Serial.println("[MQTT] System ON");
+    } else if (cmd == "0" || cmd == "off" || cmd == "disable" || cmd == "false") {
+      applySystemEnable(false, "mqtt");
+      Serial.println("[MQTT] System OFF (soft stop + pump coast)");
+    } else {
+      Serial.print("[MQTT] System set: unknown payload: ");
+      Serial.println(message);
+    }
+  }
 }
 
 bool mqttConnect() {
@@ -2162,11 +2436,18 @@ bool mqttConnect() {
     String ignitionStartTopic = mqttSettings.prefix + "/ignition/start";
     mqttClient.subscribe(ignitionStartTopic.c_str());
     
+    // Подписка на вкл/выкл системы
+    String systemSetTopic = mqttSettings.prefix + "/system/set";
+    mqttClient.subscribe(systemSetTopic.c_str());
+    
     // Подписка на температуру в доме от ESP01
     mqttClient.subscribe("home/esp01/temperature");
     
     // Подписка на LWT статус датчика температуры дома
     mqttClient.subscribe("home/esp01/status");
+    
+    // Актуальный статус системы (retain)
+    publishSystemEnabledMqtt();
     
     // Проверка режима работы после подключения к MQTT
     // Если режим Комфорт, но датчик температуры дома недоступен, переключаемся на Авто
@@ -2200,6 +2481,7 @@ void publishMqttState() {
   doc["fan"] = fanState;
   doc["pump"] = pumpState;
   doc["systemEnabled"] = systemEnabled;
+  doc["pumpCoastActive"] = pumpCoastActive;
   doc["state"] = systemState;
   doc["wifiRSSI"] = WiFi.RSSI();
   doc["wifiSSID"] = WiFi.SSID();
@@ -2612,16 +2894,21 @@ void syncRelays() {
     }
   }
   
-  // Если система выключена, принудительно выключаем реле
+  // Если система выключена: вентилятор всегда OFF, насос — по pumpState (выбег / рост подачи)
   if (!systemEnabled) {
-    if (fanState || pumpState) {
+    if (fanState) {
       fanState = false;
-      pumpState = false;
-      // Используем настройки логики для выключенного состояния
       digitalWrite(PIN_RELAY_FAN, relaySettings.fanOffIsLow ? LOW : HIGH);
-      digitalWrite(PIN_RELAY_PUMP, relaySettings.pumpOffIsLow ? LOW : HIGH);
     }
-    return;  // Не синхронизируем, если система выключена
+    if (!manualPumpControl) {
+      static bool lastPumpStateOff = false;
+      if (pumpState != lastPumpStateOff) {
+        int pumpLevel = pumpState ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
+        digitalWrite(PIN_RELAY_PUMP, pumpLevel);
+        lastPumpStateOff = pumpState;
+      }
+    }
+    return;
   }
   
   // Синхронизация реле вентилятора с переменной fanState
@@ -2981,6 +3268,7 @@ void handleStatus() {
   doc["mqttStatus"] = (mqttSettings.enabled && mqttClient.connected()) ? "Подключен" : (mqttSettings.enabled ? "Отключен" : "Выключен");
   doc["coalFeeding"] = coalFeedingActive;
   doc["coalFeedingRemaining"] = getCoalFeedingRemainingSeconds();
+  doc["pumpCoastActive"] = pumpCoastActive;
   
   // Предупреждение о низкой температуре обратки
   bool lowReturnTemp = (pumpState && returnTemp > 0 && returnTemp < 40.0);
@@ -3721,23 +4009,19 @@ void determineSystemStateOnStartup() {
 // API: Управление системой (включение/выключение)
 void handleSystemControl() {
   if (server.hasArg("enabled")) {
-    systemEnabled = server.arg("enabled").toInt() == 1;
-    saveSystemEnabledToEEPROM();
+    bool enable = server.arg("enabled").toInt() == 1;
+    applySystemEnable(enable, "web");
     
-    // Если система выключена, выключаем реле и сбрасываем таймеры
-    if (!systemEnabled) {
-      fanState = false;
-      pumpState = false;
-      // Управление реле: выключено = LOW
-      digitalWrite(PIN_RELAY_FAN, LOW);
-      digitalWrite(PIN_RELAY_PUMP, LOW);
-      resetAllTimers();  // Сбрасываем все таймеры
-      Serial.println("Система выключена - реле отключены, таймеры сброшены");
-    }
-    
-    DynamicJsonDocument doc(200);
+    DynamicJsonDocument doc(256);
     doc["success"] = true;
     doc["systemEnabled"] = systemEnabled;
+    doc["state"] = systemState;
+    doc["pumpCoastActive"] = pumpCoastActive;
+    if (enable && (systemState == "РОЗЖИГ" || ignitionInProgress)) {
+      doc["message"] = "Розжиг запущен";
+    } else if (!enable && pumpCoastActive) {
+      doc["message"] = "Система выключена, насос на выбеге";
+    }
     String response;
     serializeJson(doc, response);
     server.send(200, "application/json", response);
@@ -5916,62 +6200,8 @@ void loop() {
     }
   }
   
-  // Автоматическое управление насосом
-  if (systemEnabled && !manualPumpControl) {
-    bool shouldPumpRun = false;
-    
-    // Проверяем уличную температуру для определения режима работы насоса
-    bool outdoorTempValid = (outdoorTemp > -50.0 && outdoorTemp < 150.0);
-    bool outdoorTempBelowZero = outdoorTempValid && outdoorTemp < 0.0;
-    
-    if (supplyTemp > 0) {  // Только если есть показания датчика подачи
-      // Логика работы насоса:
-      // 1. Если уличная температура < 0°C - насос на постоянке
-      // 2. Если датчик уличной температуры в ошибке - насос на постоянке
-      // 3. Если уличная температура >= 0°C - насос от 45°C
-      
-      if (!outdoorTempValid || outdoorTempBelowZero) {
-        // Насос на постоянке (уличная < 0°C или датчик в ошибке)
-        shouldPumpRun = true;
-      } else {
-        // Насос от 45°C (уличная >= 0°C)
-        if (fanState) {
-          // Если вентилятор работает, насос должен работать
-          shouldPumpRun = true;
-        } else if (supplyTemp >= autoSettings.minTemp) {
-          // Если температура выше минимальной, насос работает для циркуляции
-          shouldPumpRun = true;
-        }
-      }
-    } else {
-      // Если датчик подачи в ошибке - насос на постоянке
-      shouldPumpRun = true;
-    }
-    
-    // Защита от застоя насоса - периодическое включение (только когда насос простаивает)
-    if (!shouldPumpRun && !pumpState) {
-      unsigned long timeSinceLastRun = (now >= lastPumpRunTime) ? (now - lastPumpRunTime) : (ULONG_MAX - lastPumpRunTime + now);
-      if (timeSinceLastRun > PUMP_ANTI_STAGNATION_INTERVAL) {
-        // Включаем насос на 2 минуты для предотвращения застоя
-        shouldPumpRun = true;
-        lastPumpRunTime = now;
-      }
-    }
-    
-    if (shouldPumpRun && !pumpState) {
-      pumpState = true;
-      lastPumpRunTime = now;
-    } else if (!shouldPumpRun && pumpState) {
-      // Проверяем, не идет ли защита от застоя
-      unsigned long pumpRunTime = (now >= lastPumpRunTime) ? (now - lastPumpRunTime) : (ULONG_MAX - lastPumpRunTime + now);
-      if (pumpRunTime < PUMP_ANTI_STAGNATION_DURATION) {
-        // Еще идет защита от застоя - не выключаем
-        shouldPumpRun = true;
-      } else {
-        pumpState = false;
-      }
-    }
-  }
+  // Автоматическое управление насосом (вкл/выкл + выбег + защита по росту подачи)
+  updatePumpLogic(now);
   
   // Синхронизация состояния реле с переменными (важно для надежности)
   syncRelays();
@@ -5987,9 +6217,10 @@ void loop() {
     autoSettingsDirty = false;
   }
   
-  // Обновление дисплея (каждые 1 секунду, чтобы не блокировать веб-сервер)
+  // Обновление дисплея (чаще при погасании — для мигания)
   static unsigned long lastDisplayUpdate = 0;
-  if (now - lastDisplayUpdate > 1000 || now < lastDisplayUpdate) {
+  unsigned long displayInterval = (boilerExtinguished || systemState == "КОТЕЛ_ПОГАС" || systemState == "ОШИБКА_РОЗЖИГА") ? 200UL : 1000UL;
+  if (now - lastDisplayUpdate > displayInterval || now < lastDisplayUpdate) {
     lastDisplayUpdate = now;
     updateDisplay();
   }
