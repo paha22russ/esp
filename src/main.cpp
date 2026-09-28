@@ -47,7 +47,7 @@
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.30"
+#define FIRMWARE_VERSION "4.2.33"
 #define DISCOVERY_UDP_PORT 4210
 #define DISCOVERY_BEACON_INTERVAL_MS 1000
 
@@ -152,6 +152,8 @@ const unsigned long PUMP_COAST_MAX_MS = 45UL * 60UL * 1000UL;  // максиму
 const unsigned long PUMP_STABLE_HOLD_MS = 3UL * 60UL * 1000UL; // стабильный тренд держать 3 мин
 const float PUMP_RISE_GUARD_MIN_TEMP = 30.0;  // защита по росту подачи выше этой t°
 bool systemEnabledMqttPending = false;  // отложенная публикация (не из mqttCallback)
+bool relaySettingsSavePending = false;  // EEPROM.commit нельзя из mqttCallback — откладываем
+bool circuitsMqttPending = false;       // MQTT publish контуров — вне callback / после API
 
 // Константы для обнаружения прогорания угля
 const unsigned long COAL_BURNED_CHECK_TIME = 10 * 60 * 1000;  // 10 минут в миллисекундах
@@ -2491,8 +2493,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     bool enable = false;
     if (parseMqttOnOff(message, enable)) {
       circuit1Enabled = enable;
-      saveRelaySettingsToEEPROM();
-      // Сразу гасим/разрешаем насос (GPIO). MQTT status — в следующем publishMqttSimple.
+      // EEPROM.commit и MQTT publish — только из loop(), не из mqttCallback
+      relaySettingsSavePending = true;
+      circuitsMqttPending = true;
       applyPumpCircuitOutputs(pumpState || pump2State || pumpCoastActive, false);
       Serial.print("[MQTT] circuit1Enabled=");
       Serial.println(enable ? "1" : "0");
@@ -2502,7 +2505,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     bool enable = false;
     if (parseMqttOnOff(message, enable)) {
       circuit2Enabled = enable;
-      saveRelaySettingsToEEPROM();
+      relaySettingsSavePending = true;
+      circuitsMqttPending = true;
       applyPumpCircuitOutputs(pumpState || pump2State || pumpCoastActive, false);
       Serial.print("[MQTT] circuit2Enabled=");
       Serial.println(enable ? "1" : "0");
@@ -3451,29 +3455,128 @@ void handleComfortMode(unsigned long now) {
   }
 }
 
-// Функция для отправки HTML интерфейса (потоковая передача)
-// Оптимизировано: убраны лишние проверки и отладочные сообщения
+// Загрузка index.html / index.html.gz в SPIFFS (восстановление UI без полного SPIFFS OTA)
+static File spiffsUploadFile;
+static String spiffsUploadPath;
+void handleSpiffsIndexUpload() {
+  HTTPUpload& upload = server.upload();
+  if (upload.status == UPLOAD_FILE_START) {
+    String name = upload.filename;
+    name.toLowerCase();
+    spiffsUploadPath = name.endsWith(".gz") ? "/index.html.gz" : "/index.html";
+    SPIFFS.remove(spiffsUploadPath);
+    spiffsUploadFile = SPIFFS.open(spiffsUploadPath, "w");
+    Serial.print("[FS] Upload start: ");
+    Serial.println(spiffsUploadPath);
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (spiffsUploadFile) {
+      spiffsUploadFile.write(upload.buf, upload.currentSize);
+    }
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (spiffsUploadFile) {
+      spiffsUploadFile.close();
+    }
+    Serial.print("[FS] Upload end bytes=");
+    Serial.println(upload.totalSize);
+  }
+}
+
+// Отдача файла кусками с yield/WDT — streamFile(224KB) блокировал loop и ронял ESP
+static bool streamFileChunked(File& file, const char* contentType, bool gzip) {
+  size_t total = file.size();
+  if (total == 0) {
+    return false;
+  }
+  server.sendHeader("Cache-Control", "no-cache, must-revalidate");
+  server.sendHeader("Connection", "close");
+  if (gzip) {
+    server.sendHeader("Content-Encoding", "gzip");
+  }
+  server.setContentLength(total);
+  server.send(200, contentType, "");
+
+  WiFiClient client = server.client();
+  uint8_t buf[512];
+  size_t sent = 0;
+  while (sent < total && client.connected()) {
+    size_t want = total - sent;
+    if (want > sizeof(buf)) {
+      want = sizeof(buf);
+    }
+    int n = file.read(buf, want);
+    if (n <= 0) {
+      break;
+    }
+    size_t off = 0;
+    while (off < (size_t)n && client.connected()) {
+      size_t w = client.write(buf + off, n - off);
+      if (w == 0) {
+        delay(1);
+        yield();
+        esp_task_wdt_reset();
+        continue;
+      }
+      off += w;
+    }
+    sent += off;
+    yield();
+    esp_task_wdt_reset();
+  }
+  return sent == total;
+}
+
+void publishCircuitsMqtt() {
+  if (!mqttSettings.enabled || !mqttClient.connected()) {
+    circuitsMqttPending = false;
+    return;
+  }
+  String t1 = mqttSettings.prefix + "/simple/circuit1";
+  String t2 = mqttSettings.prefix + "/simple/circuit2";
+  String p1 = mqttSettings.prefix + "/simple/pump";
+  String p2 = mqttSettings.prefix + "/simple/pump2";
+  mqttClient.publish(t1.c_str(), circuit1Enabled ? "1" : "0", true);
+  mqttClient.publish(t2.c_str(), circuit2Enabled ? "1" : "0", true);
+  mqttClient.publish(p1.c_str(), pumpState ? "1" : "0", false);
+  mqttClient.publish(p2.c_str(), pump2State ? "1" : "0", false);
+  circuitsMqttPending = false;
+}
+
+// HTML UI: предпочитаем gzip (~34KB вместо ~224KB), иначе сырой index с chunked+yield
 void handleWebInterface() {
-  // Оптимизированная загрузка веб-интерфейса
-  File file = SPIFFS.open("/index.html", "r");
-  if (file) {
-    // Заголовки для оптимизации загрузки
-    server.sendHeader("Cache-Control", "public, max-age=3600");  // Кеш на 1 час
-    server.sendHeader("Connection", "keep-alive");  // Keep-alive для быстрых последующих запросов
-    server.sendHeader("Content-Encoding", "identity");  // Явно указываем отсутствие сжатия
-    
-    // Увеличиваем размер буфера для более быстрой передачи
-    // Потоковая передача файла (не загружает весь файл в память)
-    // streamFile автоматически обрабатывает большие файлы по частям
-    server.streamFile(file, "text/html; charset=utf-8");
+  File file = SPIFFS.open("/index.html.gz", "r");
+  if (file && file.size() > 0) {
+    bool ok = streamFileChunked(file, "text/html; charset=utf-8", true);
+    file.close();
+    if (ok) {
+      return;
+    }
+  } else if (file) {
+    file.close();
+  }
+
+  file = SPIFFS.open("/index.html", "r");
+  if (file && file.size() > 0) {
+    streamFileChunked(file, "text/html; charset=utf-8", false);
     file.close();
     return;
   }
-  
-  // Fallback - простая версия HTML (только при ошибке)
+  if (file) {
+    file.close();
+  }
+
+  // Fallback: пустой/битый SPIFFS — форма загрузки index.html
   bool isAPMode = (WiFi.getMode() == WIFI_AP || WiFi.getMode() == WIFI_AP_STA);
   String ipStr = isAPMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
-  String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Котел</title></head><body><h1>ESP32 Boiler Control</h1><p>HTML интерфейс не загружен. Загрузите файл index.html в SPIFFS.</p><p>IP: " + ipStr + "</p></body></html>";
+  String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                "<title>Котел</title><style>body{font-family:sans-serif;max-width:420px;margin:2rem auto;padding:0 1rem}"
+                "code{background:#eee;padding:2px 6px;border-radius:4px}</style></head><body>"
+                "<h1>SPIFFS пуст</h1><p>Прошивка работает, веб-UI не в файловой системе.</p>"
+                "<p>IP: <code>" + ipStr + "</code> · FW " + String(FIRMWARE_VERSION) + "</p>"
+                "<p>API: <a href='/api/status'>/api/status</a></p>"
+                "<form method='POST' action='/api/fs/index' enctype='multipart/form-data'>"
+                "<p><input type='file' name='file' accept='.html,.gz,text/html' required></p>"
+                "<p><button type='submit'>Загрузить index.html или .gz</button></p></form>"
+                "</body></html>";
   server.send(200, "text/html; charset=utf-8", html);
 }
 
@@ -3936,16 +4039,8 @@ void handleCircuits() {
     saveRelaySettingsToEEPROM();
     // Немедленно применить выход насосов (отключение контура → насос OFF)
     applyPumpCircuitOutputs(pumpState || pump2State || pumpCoastActive, false);
-    if (mqttSettings.enabled && mqttClient.connected()) {
-      String t1 = mqttSettings.prefix + "/simple/circuit1";
-      String t2 = mqttSettings.prefix + "/simple/circuit2";
-      String p1 = mqttSettings.prefix + "/simple/pump";
-      String p2 = mqttSettings.prefix + "/simple/pump2";
-      mqttClient.publish(t1.c_str(), circuit1Enabled ? "1" : "0", true);
-      mqttClient.publish(t2.c_str(), circuit2Enabled ? "1" : "0", true);
-      mqttClient.publish(p1.c_str(), pumpState ? "1" : "0", false);
-      mqttClient.publish(p2.c_str(), pump2State ? "1" : "0", false);
-    }
+    // MQTT publish после ответа HTTP — не блокировать WebServer пачкой publish
+    circuitsMqttPending = true;
     DynamicJsonDocument responseDoc(256);
     responseDoc["success"] = true;
     responseDoc["circuit1Enabled"] = circuit1Enabled;
@@ -6310,6 +6405,21 @@ void setup() {
   
   // Настройка веб-сервера
   server.on("/", handleWebInterface);
+  server.on("/api/fs/index", HTTP_POST, []() {
+    size_t sz = 0;
+    File f = SPIFFS.open("/index.html.gz", "r");
+    if (f) { sz = f.size(); f.close(); }
+    if (sz == 0) {
+      f = SPIFFS.open("/index.html", "r");
+      if (f) { sz = f.size(); f.close(); }
+    }
+    if (sz > 0) {
+      server.sendHeader("Location", "/");
+      server.send(303, "text/plain", "OK " + String(sz));
+    } else {
+      server.send(500, "text/plain", "Upload failed (empty)");
+    }
+  }, handleSpiffsIndexUpload);
   
   // OTA обновление через веб-интерфейс
   server.on("/update", HTTP_POST, []() {
@@ -6495,7 +6605,16 @@ void loop() {
       if (systemEnabledMqttPending) {
         publishSystemEnabledMqtt();
       }
+      if (circuitsMqttPending) {
+        publishCircuitsMqtt();
+      }
     }
+  }
+
+  // EEPROM.commit вне mqttCallback — иначе зависание TCP/MQTT
+  if (relaySettingsSavePending) {
+    relaySettingsSavePending = false;
+    saveRelaySettingsToEEPROM();
   }
   
   // Периодический вывод IP адреса убран - только энкодер для отладки
