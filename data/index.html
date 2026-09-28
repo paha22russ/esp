@@ -995,8 +995,12 @@
                     <div id="fanStatusText" style="font-weight: 600; color: #888;">ВЫКЛ</div>
                 </div>
                 <div style="text-align: center;">
-                    <div style="color: #aaa; font-size: 0.9em;">Насос</div>
+                    <div style="color: #aaa; font-size: 0.9em;">Насос 1</div>
                     <div id="pumpStatusText" style="font-weight: 600; color: #888;">ВЫКЛ</div>
+                </div>
+                <div style="text-align: center;">
+                    <div style="color: #aaa; font-size: 0.9em;">Насос 2</div>
+                    <div id="pump2StatusText" style="font-weight: 600; color: #888;">ВЫКЛ</div>
                 </div>
             </div>
 
@@ -1576,6 +1580,21 @@
                     </label>
                     <small style="display: block; margin-top: 5px; opacity: 0.8;">Обратная логика вентилятора. Если выключено, снимите галочку для HIGH</small>
                 </div>
+                <div class="setting-item">
+                    <label>Контур 1 (дом / насос 1)</label>
+                    <label class="switch">
+                        <input type="checkbox" id="circuit1Enabled" checked>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div class="setting-item">
+                    <label>Контур 2 (насос 2, GPIO26)</label>
+                    <label class="switch">
+                        <input type="checkbox" id="circuit2Enabled" checked>
+                        <span class="slider"></span>
+                    </label>
+                    <small style="display: block; margin-top: 5px; opacity: 0.8;">Оба выкл = как выключение котла по циркуляции; при росте подачи насосы включаются принудительно</small>
+                </div>
                 <div class="btn-group">
                     <button class="btn btn-primary" onclick="saveRelaySettings()">💾 Сохранить</button>
                     <button class="btn btn-secondary" onclick="loadRelaySettings()">🔄 Загрузить</button>
@@ -1596,10 +1615,17 @@
                     </div>
                 </div>
                 <div class="setting-item">
-                    <label>Насос</label>
+                    <label>Насос 1 (дом)</label>
                     <div style="display: flex; gap: 10px;">
                         <button class="btn btn-success" onclick="controlRelay('pump', true, true)" style="flex: 1;">ВКЛ (Инженерное)</button>
                         <button class="btn btn-danger" onclick="controlRelay('pump', false, true)" style="flex: 1;">ВЫКЛ (Инженерное)</button>
+                    </div>
+                </div>
+                <div class="setting-item">
+                    <label>Насос 2 (контур 2)</label>
+                    <div style="display: flex; gap: 10px;">
+                        <button class="btn btn-success" onclick="controlRelay('pump2', true, true)" style="flex: 1;">ВКЛ (Инженерное)</button>
+                        <button class="btn btn-danger" onclick="controlRelay('pump2', false, true)" style="flex: 1;">ВЫКЛ (Инженерное)</button>
                     </div>
                 </div>
                 <div class="setting-item">
@@ -2376,6 +2402,7 @@
                     // Обновление состояний вентилятора и насоса
                     const fanStatusText = document.getElementById('fanStatusText');
                     const pumpStatusText = document.getElementById('pumpStatusText');
+                    const pump2StatusText = document.getElementById('pump2StatusText');
                     
                     if (fanStatusText) {
                         fanStatusText.textContent = d.fan ? 'ВКЛ' : 'ВЫКЛ';
@@ -2385,6 +2412,11 @@
                     if (pumpStatusText) {
                         pumpStatusText.textContent = d.pump ? 'ВКЛ' : 'ВЫКЛ';
                         pumpStatusText.style.color = d.pump ? '#00ff00' : '#888';
+                    }
+
+                    if (pump2StatusText) {
+                        pump2StatusText.textContent = d.pump2 ? 'ВКЛ' : 'ВЫКЛ';
+                        pump2StatusText.style.color = d.pump2 ? '#00ff00' : '#888';
                     }
                     
                     // Обновление режима работы
@@ -3641,6 +3673,10 @@
                     document.getElementById('fanOffIsLow').checked = d.fanOffIsLow !== undefined ? d.fanOffIsLow : true;
                     document.getElementById('pumpOffIsLow').checked = d.pumpOffIsLow !== undefined ? d.pumpOffIsLow : true;
                     document.getElementById('sensorsOffIsLow').checked = d.sensorsOffIsLow !== undefined ? d.sensorsOffIsLow : true;
+                    var c1 = document.getElementById('circuit1Enabled');
+                    var c2 = document.getElementById('circuit2Enabled');
+                    if (c1) c1.checked = d.circuit1Enabled !== undefined ? d.circuit1Enabled : true;
+                    if (c2) c2.checked = d.circuit2Enabled !== undefined ? d.circuit2Enabled : true;
                     updateManualControlStatus(d);
                 })
                 .catch(e => {
@@ -3652,7 +3688,9 @@
             const settings = {
                 fanOffIsLow: document.getElementById('fanOffIsLow').checked,
                 pumpOffIsLow: document.getElementById('pumpOffIsLow').checked,
-                sensorsOffIsLow: document.getElementById('sensorsOffIsLow').checked
+                sensorsOffIsLow: document.getElementById('sensorsOffIsLow').checked,
+                circuit1Enabled: document.getElementById('circuit1Enabled') ? document.getElementById('circuit1Enabled').checked : true,
+                circuit2Enabled: document.getElementById('circuit2Enabled') ? document.getElementById('circuit2Enabled').checked : true
             };
             
             console.log('Сохранение настроек реле:', settings);
@@ -3677,6 +3715,12 @@
                     }
                     if (d.pumpOffIsLow !== undefined) {
                         document.getElementById('pumpOffIsLow').checked = d.pumpOffIsLow;
+                    }
+                    if (d.circuit1Enabled !== undefined && document.getElementById('circuit1Enabled')) {
+                        document.getElementById('circuit1Enabled').checked = d.circuit1Enabled;
+                    }
+                    if (d.circuit2Enabled !== undefined && document.getElementById('circuit2Enabled')) {
+                        document.getElementById('circuit2Enabled').checked = d.circuit2Enabled;
                     }
                     alert('Настройки реле сохранены!');
                 } else {

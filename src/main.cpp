@@ -25,7 +25,7 @@
 #include <Wire.h>
 #endif
 
-#define EEPROM_SIZE 1024
+#define EEPROM_SIZE 5120  // covers FAN_STATS at 4400 (+ margin)
 #define EEPROM_MAGIC 0xAA
 #define EEPROM_ADDR_MAGIC 0
 #define EEPROM_ADDR_AUTO 1
@@ -47,7 +47,7 @@
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.28"
+#define FIRMWARE_VERSION "4.2.29"
 #define DISCOVERY_UDP_PORT 4210
 #define DISCOVERY_BEACON_INTERVAL_MS 1000
 
@@ -60,7 +60,8 @@
 
 // Пины подключения
 #define PIN_RELAY_FAN 16
-#define PIN_RELAY_PUMP 17
+#define PIN_RELAY_PUMP 17   // Контур 1 (дом)
+#define PIN_RELAY_PUMP2 26  // Контур 2
 #define PIN_RELAY_SENSORS 25  // Реле питания датчиков DS18B20
 #define PIN_OLED_SDA 21
 #define PIN_OLED_SCL 22
@@ -156,9 +157,14 @@ bool systemEnabledMqttPending = false;  // отложенная публикац
 const unsigned long COAL_BURNED_CHECK_TIME = 10 * 60 * 1000;  // 10 минут в миллисекундах
 bool fanState = false;
 bool pumpState = false;
+bool pump2State = false;
 bool systemEnabled = true;  // Флаг включения/выключения системы
 String systemState = "IDLE";
 int workMode = 0;  // 0 = Авто, 1 = Комфорт
+
+// Контуры отопления: насос1 = дом, насос2 = второй контур
+bool circuit1Enabled = true;
+bool circuit2Enabled = true;
 
 // Защита от частых переключений вентилятора
 unsigned long lastFanToggleTime = 0;  // Время последнего переключения вентилятора
@@ -168,7 +174,8 @@ const float FAN_TOGGLE_MIN_TEMP_DELTA = 0.3;  // Минимальное изме
 
 // Инженерное управление реле
 bool manualFanControl = false;  // Ручное управление вентилятором
-bool manualPumpControl = false;  // Ручное управление насосом
+bool manualPumpControl = false;  // Ручное управление насосом 1
+bool manualPump2Control = false;  // Ручное управление насосом 2
 bool sensorsRelayState = true;  // Состояние реле датчиков (true = включено, false = выключено)
 bool sensorsResetPending = false;  // Флаг ожидания автоматического включения реле датчиков
 unsigned long sensorsResetStartTime = 0;  // Время начала ожидания сброса
@@ -437,6 +444,13 @@ void saveMLSettingsToEEPROM();
 void loadMLSettingsFromEEPROM();
 void publishMqttML();
 void syncRelays();  // Синхронизация состояния реле с переменными
+void beginFanCycle(unsigned long now);
+void endFanCycle();
+void setFanDesired(bool on);
+void setPumpDesired(bool on);
+void setPump2Desired(bool on);
+void writeActuatorGpios();
+bool isSupplyTempValid();
 void saveRelaySettingsToEEPROM();
 void loadRelaySettingsFromEEPROM();
 void saveComfortSettingsToEEPROM();
@@ -454,9 +468,11 @@ void checkIgnitionProgress(unsigned long now);
 void applySystemEnable(bool enable, const char* source);
 void startPumpCoast(const char* reason);
 void updatePumpLogic(unsigned long now);
+void applyPumpCircuitOutputs(bool demand, bool forceSafety);
 void publishSystemEnabledMqtt();
 void queueSystemEnabledMqtt();
 bool parseMqttOnOff(const String& message, bool& enableOut);
+void handleCircuits();
 void saveOtaResult(uint8_t status, const char* fromVer, const char* toVer, const char* message);
 void loadOtaResult();
 void clearOtaResult();
@@ -1445,9 +1461,12 @@ void loadMLSettingsFromEEPROM() {
 // Сохранение настроек реле в EEPROM
 void saveRelaySettingsToEEPROM() {
   EEPROM.begin(EEPROM_SIZE);
-  DynamicJsonDocument doc(128);
+  DynamicJsonDocument doc(256);
   doc["fanOffIsLow"] = relaySettings.fanOffIsLow;
   doc["pumpOffIsLow"] = relaySettings.pumpOffIsLow;
+  doc["sensorsOffIsLow"] = relaySettings.sensorsOffIsLow;
+  doc["circuit1Enabled"] = circuit1Enabled;
+  doc["circuit2Enabled"] = circuit2Enabled;
   
   String json;
   serializeJson(doc, json);
@@ -1483,7 +1502,7 @@ void loadRelaySettingsFromEEPROM() {
       for (int i = 0; i < len; i++) {
         json += (char)EEPROM.read(EEPROM_ADDR_RELAY + 4 + i);
       }
-      DynamicJsonDocument doc(128);
+      DynamicJsonDocument doc(256);
       DeserializationError error = deserializeJson(doc, json);
       if (!error) {
         Serial.print("[Реле] Загружено из EEPROM: ");
@@ -1502,6 +1521,12 @@ void loadRelaySettingsFromEEPROM() {
           relaySettings.sensorsOffIsLow = doc["sensorsOffIsLow"].as<bool>();
           Serial.print("[Реле] sensorsOffIsLow загружено: ");
           Serial.println(relaySettings.sensorsOffIsLow ? "true" : "false");
+        }
+        if (doc.containsKey("circuit1Enabled")) {
+          circuit1Enabled = doc["circuit1Enabled"].as<bool>();
+        }
+        if (doc.containsKey("circuit2Enabled")) {
+          circuit2Enabled = doc["circuit2Enabled"].as<bool>();
         }
         Serial.println("[Реле] Настройки успешно загружены из EEPROM");
       } else {
@@ -1860,7 +1885,8 @@ void loadFanStatsFromEEPROM() {
 
 // Функция запуска розжига
 void startIgnition() {
-  if (boilerExtinguished || systemState == "КОТЕЛ_ПОГАС" || systemState == "ОШИБКА_РОЗЖИГА") {
+  if (boilerExtinguished || systemState == "КОТЕЛ_ПОГАС" || systemState == "ОШИБКА_РОЗЖИГА" ||
+      systemState == "COAL_BURNED" || systemState == "HEATING_TIMEOUT") {
     boilerExtinguished = false;
     systemEnabled = true;
     pumpCoastActive = false;
@@ -1870,10 +1896,7 @@ void startIgnition() {
     ignitionInProgress = true;
     ignitionStartTime = millis();
     ignitionStartTemp = supplyTemp;
-    fanStartTime = 0;
-    maxTempDuringFan = 0.0;
-    fanState = true;
-    digitalWrite(PIN_RELAY_FAN, HIGH);
+    setFanDesired(true);
     systemState = "РОЗЖИГ";
     
     char details[50];
@@ -1899,13 +1922,12 @@ void checkBoilerExtinguished(unsigned long now) {
   
   // Если вентилятор только что включился
   if (fanStartTime == 0) {
-    fanStartTime = now;
-    maxTempDuringFan = supplyTemp;
+    beginFanCycle(now);
     return;
   }
   
   // Обновляем максимальную температуру
-  if (supplyTemp > maxTempDuringFan) {
+  if (isSupplyTempValid() && supplyTemp > maxTempDuringFan) {
     maxTempDuringFan = supplyTemp;
   }
   
@@ -1923,8 +1945,7 @@ void checkBoilerExtinguished(unsigned long now) {
       // Если температура упала на заданное значение
       if (tempDrop >= BOILER_EXTINGUISHED_TEMP_DROP) {
         boilerExtinguished = true;
-        fanState = false;
-        digitalWrite(PIN_RELAY_FAN, LOW);
+        setFanDesired(false);
         systemState = "КОТЕЛ_ПОГАС";
         
         char details[50];
@@ -1963,8 +1984,7 @@ void checkIgnitionProgress(unsigned long now) {
     ignitionInProgress = false;
     systemState = "HEATING";
     heatingStartTime = now;
-    fanStartTime = now;
-    maxTempDuringFan = supplyTemp;
+    beginFanCycle(now);  // новый цикл детекции погасания после успеха
     
     char details[50];
     snprintf(details, sizeof(details), "Успех за %lu мин, +%.1f°C", ignitionElapsed / 60000, tempIncrease);
@@ -1988,8 +2008,7 @@ void checkIgnitionProgress(unsigned long now) {
   if (ignitionElapsed >= timeout) {
     // Розжиг неудачен
     ignitionInProgress = false;
-    fanState = false;
-    digitalWrite(PIN_RELAY_FAN, LOW);
+    setFanDesired(false);
     systemState = "ОШИБКА_РОЗЖИГА";
     boilerExtinguished = true;
     
@@ -2088,6 +2107,24 @@ String getFormattedDate() {
   return String(dateStr);
 }
 
+// Валидность температуры подачи (не «замороженные» 0/85 DS18B20 и не мусор)
+bool isSupplyTempValid() {
+  if (supplyTemp <= -20.0f || supplyTemp >= 120.0f) {
+    return false;
+  }
+  // Классические маркеры зависания DS18B20
+  if (supplyTemp > -0.15f && supplyTemp < 0.15f) {
+    return false;
+  }
+  if (supplyTemp > 84.5f && supplyTemp < 85.5f) {
+    return false;
+  }
+  if (lastValidSupplyTempTime == 0) {
+    return false;
+  }
+  return true;
+}
+
 // Публикация статуса системы в MQTT (вызывать вне mqttCallback)
 void publishSystemEnabledMqtt() {
   if (!mqttSettings.enabled || !mqttClient.connected()) {
@@ -2131,7 +2168,8 @@ void startPumpCoast(const char* reason) {
   pumpCoastActive = true;
   pumpCoastStartTime = millis();
   pumpStableSince = 0;
-  pumpState = true;
+  // Safety: принудительно включаем нужные насосы (оба, если контуры выкл)
+  applyPumpCircuitOutputs(true, true);
   Serial.print("[Насос] Выбег/защита: ");
   Serial.println(reason ? reason : "start");
 }
@@ -2141,7 +2179,8 @@ void applySystemEnable(bool enable, const char* source) {
   const char* src = source ? source : "unknown";
   
   if (enable) {
-    if (boilerExtinguished || systemState == "КОТЕЛ_ПОГАС" || systemState == "ОШИБКА_РОЗЖИГА") {
+    if (boilerExtinguished || systemState == "КОТЕЛ_ПОГАС" || systemState == "ОШИБКА_РОЗЖИГА" ||
+        systemState == "COAL_BURNED") {
       Serial.print("[Система] Вкл (");
       Serial.print(src);
       Serial.println(") при погасании → розжиг");
@@ -2154,6 +2193,9 @@ void applySystemEnable(bool enable, const char* source) {
     pumpCoastActive = false;
     pumpCoastStartTime = 0;
     pumpStableSince = 0;
+    if (systemState == "HEATING_TIMEOUT") {
+      systemState = "IDLE";
+    }
     saveSystemEnabledToEEPROM();
     queueSystemEnabledMqtt();
     Serial.print("[Система] Включена (");
@@ -2167,35 +2209,34 @@ void applySystemEnable(bool enable, const char* source) {
   bool needCoast = wasEnabled && (
       fanState ||
       pumpState ||
+      pump2State ||
       ignitionInProgress ||
-      (supplyTemp >= autoSettings.minTemp) ||
+      (isSupplyTempValid() && supplyTemp >= autoSettings.minTemp) ||
       systemState == "HEATING" ||
       systemState == "РОЗЖИГ" ||
-      systemState == "HIGH_TEMP"
+      systemState == "HIGH_TEMP" ||
+      systemState == "HEATING_TIMEOUT" ||
+      systemState == "COAL_BURNED"
   );
   
   systemEnabled = false;
-  fanState = false;
-  digitalWrite(PIN_RELAY_FAN, relaySettings.fanOffIsLow ? LOW : HIGH);
+  setFanDesired(false);
   
   // Останавливаем розжиг/подброс, но не сбрасываем историю трендов
   ignitionInProgress = false;
   ignitionStartTime = 0;
   coalFeedingActive = false;
   heatingStartTime = 0;
-  fanStartTime = 0;
-  maxTempDuringFan = 0.0;
   
   saveSystemEnabledToEEPROM();
   
-  if (needCoast || (supplyTemp >= PUMP_RISE_GUARD_MIN_TEMP && getTemperatureTrend(&supplyHistory) != 0)) {
+  if (needCoast || (isSupplyTempValid() && supplyTemp >= PUMP_RISE_GUARD_MIN_TEMP && getTemperatureTrend(&supplyHistory) != 0)) {
     startPumpCoast(src);
   } else {
     pumpCoastActive = false;
     pumpCoastStartTime = 0;
     pumpStableSince = 0;
-    pumpState = false;
-    digitalWrite(PIN_RELAY_PUMP, relaySettings.pumpOffIsLow ? LOW : HIGH);
+    applyPumpCircuitOutputs(false, false);
   }
   
   queueSystemEnabledMqtt();
@@ -2205,33 +2246,38 @@ void applySystemEnable(bool enable, const char* source) {
   Serial.println(pumpCoastActive ? "да" : "нет");
 }
 
-// Логика насоса: обычный режим + выбег после выкл + защита при росте подачи
+// Логика насоса: обычный режим + выбег после выкл + защита при росте подачи + контуры
 void updatePumpLogic(unsigned long now) {
-  if (manualPumpControl) {
+  if (manualPumpControl && manualPump2Control) {
     return;
   }
   
   int supplyTrend = getTemperatureTrend(&supplyHistory);
-  bool supplyValid = (supplyTemp > 0);
+  bool supplyValid = isSupplyTempValid();
   bool riseGuard = supplyValid && supplyTemp >= PUMP_RISE_GUARD_MIN_TEMP && supplyTrend == 1;
+  bool outdoorTempValid = (outdoorTemp > -50.0 && outdoorTemp < 150.0);
+  bool outdoorTempBelowZero = outdoorTempValid && outdoorTemp < 0.0;
+  bool forceSafety = riseGuard || outdoorTempBelowZero;
   
   // В любом состоянии: рост подачи → насос обязателен (тлеющий котёл разгорелся)
   if (riseGuard) {
-    if (!pumpState || !pumpCoastActive) {
+    if ((!pumpState && !pump2State) || !pumpCoastActive) {
       startPumpCoast("рост подачи");
     } else {
       pumpStableSince = 0;
-      pumpState = true;
+      applyPumpCircuitOutputs(true, true);
     }
   }
   
   if (systemEnabled) {
     bool shouldPumpRun = false;
     
-    bool outdoorTempValid = (outdoorTemp > -50.0 && outdoorTemp < 150.0);
-    bool outdoorTempBelowZero = outdoorTempValid && outdoorTemp < 0.0;
+    // Оба контура выкл → циркуляция как при выкл системы (только safety)
+    bool bothCircuitsOff = !circuit1Enabled && !circuit2Enabled;
     
-    if (supplyValid) {
+    if (bothCircuitsOff && !forceSafety) {
+      shouldPumpRun = false;
+    } else if (supplyValid) {
       if (!outdoorTempValid || outdoorTempBelowZero) {
         shouldPumpRun = true;
       } else {
@@ -2242,15 +2288,17 @@ void updatePumpLogic(unsigned long now) {
         }
       }
     } else {
+      // Нет валидной подачи — насосы ON (безопасность)
       shouldPumpRun = true;
     }
     
-    if (riseGuard) {
+    if (forceSafety) {
       shouldPumpRun = true;
     }
     
     // Защита от застоя
-    if (!shouldPumpRun && !pumpState) {
+    bool anyPumpOn = pumpState || pump2State;
+    if (!shouldPumpRun && !anyPumpOn) {
       unsigned long timeSinceLastRun = (now >= lastPumpRunTime) ? (now - lastPumpRunTime) : (ULONG_MAX - lastPumpRunTime + now);
       if (timeSinceLastRun > PUMP_ANTI_STAGNATION_INTERVAL) {
         shouldPumpRun = true;
@@ -2258,35 +2306,33 @@ void updatePumpLogic(unsigned long now) {
       }
     }
     
-    if (shouldPumpRun && !pumpState) {
-      pumpState = true;
+    if (shouldPumpRun && !anyPumpOn) {
       lastPumpRunTime = now;
-    } else if (!shouldPumpRun && pumpState) {
+    } else if (!shouldPumpRun && anyPumpOn) {
       unsigned long pumpRunTime = (now >= lastPumpRunTime) ? (now - lastPumpRunTime) : (ULONG_MAX - lastPumpRunTime + now);
       if (pumpRunTime < PUMP_ANTI_STAGNATION_DURATION) {
-        // антизастой — ещё держим
-      } else if (riseGuard) {
-        pumpState = true;
+        shouldPumpRun = true;  // антизастой — ещё держим
+      } else if (forceSafety) {
+        shouldPumpRun = true;
       } else {
-        pumpState = false;
+        shouldPumpRun = false;
       }
     }
     
-    // При включённой системе выбег не нужен
+    // При включённой системе выбег не нужен (кроме riseGuard)
     if (pumpCoastActive && !riseGuard) {
       pumpCoastActive = false;
       pumpCoastStartTime = 0;
       pumpStableSince = 0;
     }
+    
+    applyPumpCircuitOutputs(shouldPumpRun, forceSafety);
     return;
   }
   
   // --- Система выключена ---
   bool shouldPumpRun = false;
-  bool outdoorTempValid = (outdoorTemp > -50.0 && outdoorTemp < 150.0);
-  bool outdoorTempBelowZero = outdoorTempValid && outdoorTemp < 0.0;
   
-  // Антизамерзание контура при морозе — даже если система выкл
   if (outdoorTempBelowZero) {
     shouldPumpRun = true;
   }
@@ -2324,20 +2370,18 @@ void updatePumpLogic(unsigned long now) {
           }
         }
       } else if (supplyTrend != 0) {
-        // Ещё падает или растёт — ждём стабилизации
         pumpStableSince = 0;
       }
     }
   }
   
   if (shouldPumpRun) {
-    if (!pumpState) {
+    if (!pumpState && !pump2State) {
       lastPumpRunTime = now;
     }
-    pumpState = true;
-  } else {
-    pumpState = false;
   }
+  
+  applyPumpCircuitOutputs(shouldPumpRun, forceSafety);
 }
 
 // MQTT функции
@@ -2439,6 +2483,28 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       Serial.println(message);
     }
   }
+
+  // Контуры отопления
+  String circuit1SetTopic = mqttSettings.prefix + "/circuit1/set";
+  String circuit2SetTopic = mqttSettings.prefix + "/circuit2/set";
+  if (topicStr == circuit1SetTopic) {
+    bool enable = false;
+    if (parseMqttOnOff(message, enable)) {
+      circuit1Enabled = enable;
+      saveRelaySettingsToEEPROM();
+      Serial.print("[MQTT] circuit1Enabled=");
+      Serial.println(enable ? "1" : "0");
+    }
+  }
+  if (topicStr == circuit2SetTopic) {
+    bool enable = false;
+    if (parseMqttOnOff(message, enable)) {
+      circuit2Enabled = enable;
+      saveRelaySettingsToEEPROM();
+      Serial.print("[MQTT] circuit2Enabled=");
+      Serial.println(enable ? "1" : "0");
+    }
+  }
 }
 
 bool mqttConnect() {
@@ -2499,6 +2565,11 @@ bool mqttConnect() {
     mqttClient.subscribe(systemSetTopic.c_str());
     String systemSetTopicAlt = mqttSettings.prefix + "/simple/enabled/set";
     mqttClient.subscribe(systemSetTopicAlt.c_str());
+
+    String circuit1SetTopic = mqttSettings.prefix + "/circuit1/set";
+    mqttClient.subscribe(circuit1SetTopic.c_str());
+    String circuit2SetTopic = mqttSettings.prefix + "/circuit2/set";
+    mqttClient.subscribe(circuit2SetTopic.c_str());
     
     // Подписка на температуру в доме от ESP01
     mqttClient.subscribe("home/esp01/temperature");
@@ -2541,6 +2612,9 @@ void publishMqttState() {
   doc["setpoint"] = setpoint;
   doc["fan"] = fanState;
   doc["pump"] = pumpState;
+  doc["pump2"] = pump2State;
+  doc["circuit1Enabled"] = circuit1Enabled;
+  doc["circuit2Enabled"] = circuit2Enabled;
   doc["systemEnabled"] = systemEnabled;
   doc["pumpCoastActive"] = pumpCoastActive;
   doc["state"] = systemState;
@@ -2595,6 +2669,17 @@ void publishMqttSimple() {
   // Публикация состояния системы (retain — чтобы wqtt не откатывал переключатель)
   mqttClient.publish(enabledTopic.c_str(), systemEnabled ? "1" : "0", true);
   mqttClient.publish(setpointTopic.c_str(), String(setpoint, 1).c_str(), false);
+
+  String pumpTopic = mqttSettings.prefix + "/simple/pump";
+  String pump2Topic = mqttSettings.prefix + "/simple/pump2";
+  String fanTopic = mqttSettings.prefix + "/simple/fan";
+  String circuit1Topic = mqttSettings.prefix + "/simple/circuit1";
+  String circuit2Topic = mqttSettings.prefix + "/simple/circuit2";
+  mqttClient.publish(fanTopic.c_str(), fanState ? "1" : "0", false);
+  mqttClient.publish(pumpTopic.c_str(), pumpState ? "1" : "0", false);
+  mqttClient.publish(pump2Topic.c_str(), pump2State ? "1" : "0", false);
+  mqttClient.publish(circuit1Topic.c_str(), circuit1Enabled ? "1" : "0", true);
+  mqttClient.publish(circuit2Topic.c_str(), circuit2Enabled ? "1" : "0", true);
   
   // Публикация режима работы (0 = Авто, 1 = Комфорт)
   mqttClient.publish(workModeTopic.c_str(), String(workMode).c_str(), false);
@@ -2637,6 +2722,9 @@ void publishMqttML() {
   // 2. Состояния устройств
   doc["fan"] = fanState;
   doc["pump"] = pumpState;
+  doc["pump2"] = pump2State;
+  doc["circuit1Enabled"] = circuit1Enabled;
+  doc["circuit2Enabled"] = circuit2Enabled;
   doc["systemEnabled"] = systemEnabled;
   doc["state"] = systemState;
   
@@ -2936,63 +3024,160 @@ void handleSerialCommands() {
   }
 }
 
+// --- Actuator layer: единая точка GPIO для FAN / PUMP / PUMP2 ---
+void beginFanCycle(unsigned long now) {
+  fanStartTime = now;
+  maxTempDuringFan = isSupplyTempValid() ? supplyTemp : 0.0f;
+  coalBurnedCheckStart = 0;
+}
+
+void endFanCycle() {
+  fanStartTime = 0;
+  maxTempDuringFan = 0.0f;
+  coalBurnedCheckStart = 0;
+}
+
+void writeActuatorGpios() {
+  int fanLevel = fanState ? HIGH : (relaySettings.fanOffIsLow ? LOW : HIGH);
+  digitalWrite(PIN_RELAY_FAN, fanLevel);
+
+  if (!manualPumpControl) {
+    int pumpLevel = pumpState ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
+    digitalWrite(PIN_RELAY_PUMP, pumpLevel);
+  }
+  if (!manualPump2Control) {
+    int pump2Level = pump2State ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
+    digitalWrite(PIN_RELAY_PUMP2, pump2Level);
+  }
+}
+
+void setFanDesired(bool on) {
+  if (fanState == on) {
+    if (on && fanStartTime == 0) {
+      beginFanCycle(millis());
+    }
+    writeActuatorGpios();
+    return;
+  }
+  fanState = on;
+  if (on) {
+    beginFanCycle(millis());
+  } else {
+    endFanCycle();
+  }
+  writeActuatorGpios();
+}
+
+void setPumpDesired(bool on) {
+  if (manualPumpControl) {
+    return;
+  }
+  if (pumpState == on) {
+    return;
+  }
+  pumpState = on;
+  int pumpLevel = pumpState ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
+  digitalWrite(PIN_RELAY_PUMP, pumpLevel);
+}
+
+void setPump2Desired(bool on) {
+  if (manualPump2Control) {
+    return;
+  }
+  if (pump2State == on) {
+    return;
+  }
+  pump2State = on;
+  int pump2Level = pump2State ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
+  digitalWrite(PIN_RELAY_PUMP2, pump2Level);
+}
+
+// Применение спроса насосов с учётом контуров и safety (rise/frost)
+void applyPumpCircuitOutputs(bool demand, bool forceSafety) {
+  bool c1 = circuit1Enabled;
+  bool c2 = circuit2Enabled;
+  bool bothOff = !c1 && !c2;
+
+  bool want1 = false;
+  bool want2 = false;
+
+  if (forceSafety) {
+    // Рост/мороз: включаем разрешённые контуры; если оба выкл — всё равно оба для safety
+    if (bothOff) {
+      want1 = true;
+      want2 = true;
+    } else {
+      want1 = c1;
+      want2 = c2;
+    }
+  } else if (bothOff) {
+    // Оба контура выкл → как выключение котла по циркуляции
+    want1 = false;
+    want2 = false;
+  } else {
+    want1 = demand && c1;
+    want2 = demand && c2;
+  }
+
+  setPumpDesired(want1);
+  setPump2Desired(want2);
+}
+
 // Функция синхронизации состояния реле с переменными
 void syncRelays() {
   // Проверка таймаута ручного управления (2 минуты)
   if (lastManualControlTime > 0) {
     unsigned long elapsed = millis() - lastManualControlTime;
     if (elapsed > MANUAL_CONTROL_TIMEOUT) {
-      // Возврат к автоматическому управлению
       if (manualFanControl) {
         manualFanControl = false;
         Serial.println("[Реле] Ручное управление вентилятором отключено (таймаут 2 мин)");
       }
       if (manualPumpControl) {
         manualPumpControl = false;
-        Serial.println("[Реле] Ручное управление насосом отключено (таймаут 2 мин)");
+        Serial.println("[Реле] Ручное управление насосом 1 отключено (таймаут 2 мин)");
+      }
+      if (manualPump2Control) {
+        manualPump2Control = false;
+        Serial.println("[Реле] Ручное управление насосом 2 отключено (таймаут 2 мин)");
       }
       lastManualControlTime = 0;
     }
   }
-  
-  // Если система выключена: вентилятор всегда OFF, насос — по pumpState (выбег / рост подачи)
+
+  // Safety: ручной вентилятор не должен работать при перегреве
+  if (manualFanControl && fanState && isSupplyTempValid()) {
+    float ohLimit = (workMode == 1) ? comfortSettings.warningTemp : autoSettings.overheatTemp;
+    if (supplyTemp >= ohLimit) {
+      Serial.println("[Безопасность] Ручной вентилятор принудительно ВЫКЛ (перегрев)");
+      setFanDesired(false);
+      manualFanControl = false;
+    }
+  }
+
+  // Если система выключена: вентилятор всегда OFF; насосы — по pumpState/pump2State
   if (!systemEnabled) {
     if (fanState) {
-      fanState = false;
-      digitalWrite(PIN_RELAY_FAN, relaySettings.fanOffIsLow ? LOW : HIGH);
-    }
-    if (!manualPumpControl) {
-      static bool lastPumpStateOff = false;
-      if (pumpState != lastPumpStateOff) {
-        int pumpLevel = pumpState ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
-        digitalWrite(PIN_RELAY_PUMP, pumpLevel);
-        lastPumpStateOff = pumpState;
-      }
+      setFanDesired(false);
+    } else {
+      writeActuatorGpios();
     }
     return;
   }
-  
-  // Синхронизация реле вентилятора с переменной fanState
-  // Если ручное управление активно, не меняем состояние
+
   if (!manualFanControl) {
-    static bool lastFanState = false;
-    if (fanState != lastFanState) {
-      // Включено = HIGH, выключено = зависит от настройки
-      int fanLevel = fanState ? HIGH : (relaySettings.fanOffIsLow ? LOW : HIGH);
-      digitalWrite(PIN_RELAY_FAN, fanLevel);
-      lastFanState = fanState;
-    }
-  }
-  
-  // Синхронизация реле насоса с переменной pumpState
-  // Если ручное управление активно, не меняем состояние
-  if (!manualPumpControl) {
-    static bool lastPumpState = false;
-    if (pumpState != lastPumpState) {
-      // Включено = HIGH, выключено = зависит от настройки
+    writeActuatorGpios();
+  } else {
+    // Fan под manual — пишем текущий fanState; насосы по логике
+    int fanLevel = fanState ? HIGH : (relaySettings.fanOffIsLow ? LOW : HIGH);
+    digitalWrite(PIN_RELAY_FAN, fanLevel);
+    if (!manualPumpControl) {
       int pumpLevel = pumpState ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
       digitalWrite(PIN_RELAY_PUMP, pumpLevel);
-      lastPumpState = pumpState;
+    }
+    if (!manualPump2Control) {
+      int pump2Level = pump2State ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
+      digitalWrite(PIN_RELAY_PUMP2, pump2Level);
     }
   }
 }
@@ -3007,9 +3192,8 @@ void startCoalFeeding() {
   coalFeedingStartTime = millis();
   fanStateBeforeCoalFeeding = fanState;
   
-  // Выключаем вентилятор
-  fanState = false;
-  digitalWrite(PIN_RELAY_FAN, LOW);
+  // Выключаем вентилятор через actuator layer (закрывает fan cycle)
+  setFanDesired(false);
   
   
   // Публикация в MQTT
@@ -3030,15 +3214,10 @@ void stopCoalFeeding() {
   coalFeedingActive = false;
   
   // Восстанавливаем состояние вентилятора (или оставляем выключенным, если система выключена)
-  if (systemEnabled) {
-    // Восстанавливаем предыдущее состояние или оставляем управление автоматике
-    // fanState = fanStateBeforeCoalFeeding;  // Можно раскомментировать для восстановления
-  } else {
-    fanState = false;
+  if (!systemEnabled) {
+    setFanDesired(false);
   }
-  
-  digitalWrite(PIN_RELAY_FAN, fanState ? HIGH : LOW);
-  
+  // иначе оставляем управление автоматике (fan остаётся OFF после подброса)
   
   // Публикация в MQTT
   if (mqttSettings.enabled && mqttClient.connected()) {
@@ -3120,7 +3299,7 @@ void handleComfortMode(unsigned long now) {
   
   // Защита от перегрева
   if (supplyTemp >= comfortSettings.warningTemp) {
-    fanState = false;
+    setFanDesired(false);
     systemState = "OVERHEAT";
     comfortState = "OVERHEAT";
     return;
@@ -3139,7 +3318,7 @@ void handleComfortMode(unsigned long now) {
   
   if (comfortState == "WAIT") {
     systemState = "Ожидание";
-    fanState = false;
+    setFanDesired(false);
     if (homeTemp < (comfortSettings.targetHomeTemp - comfortSettings.hysteresisOn)) {
       comfortState = "HEATING_1";
       comfortStateStartTime = now;
@@ -3149,16 +3328,10 @@ void handleComfortMode(unsigned long now) {
     systemState = "Разогрев 1";
     if (supplyTemp < intermediateTemp) {
       if (!boilerExtinguished) {
-        fanState = true;
-        if (fanStartTime == 0) {
-          fanStartTime = now;
-          maxTempDuringFan = supplyTemp;
-        }
+        setFanDesired(true);
       }
     } else {
-      fanState = false;
-      fanStartTime = 0;
-      maxTempDuringFan = 0.0;
+      setFanDesired(false);
       comfortState = "WAIT_COOLING";
       comfortStateStartTime = now;
       homeTempAtStateStart = homeTemp;
@@ -3166,9 +3339,9 @@ void handleComfortMode(unsigned long now) {
   } else if (comfortState == "WAIT_COOLING") {
     systemState = "Ожидание охлаждения";
     if (supplyTemp < 63.0) {
-      fanState = true;
+      setFanDesired(true);
     } else if (supplyTemp >= comfortSettings.waitTemp) {
-      fanState = false;
+      setFanDesired(false);
     }
     if (stateElapsed >= comfortSettings.waitCoolingTime) {
       if (supplyTemp <= comfortSettings.waitTemp && supplyTemp >= 60.0) {
@@ -3183,9 +3356,9 @@ void handleComfortMode(unsigned long now) {
   } else if (comfortState == "WAIT_HEATING") {
     systemState = "Ожидание прогрева";
     if (supplyTemp < 63.0) {
-      fanState = true;
+      setFanDesired(true);
     } else if (supplyTemp >= comfortSettings.waitTemp) {
-      fanState = false;
+      setFanDesired(false);
     }
     if (stateElapsed >= comfortSettings.waitAfterHeating1Time) {
       float homeTempChange = homeTemp - homeTempAtStateStart;
@@ -3202,9 +3375,9 @@ void handleComfortMode(unsigned long now) {
   } else if (comfortState == "HEATING_2") {
     systemState = "Разогрев 2";
     if (supplyTemp < comfortSettings.maxBoilerTemp) {
-      fanState = true;
+      setFanDesired(true);
     } else {
-      fanState = false;
+      setFanDesired(false);
       comfortState = "WAIT_HEATING";
       comfortStateStartTime = now;
       homeTempAtStateStart = homeTemp;
@@ -3213,7 +3386,7 @@ void handleComfortMode(unsigned long now) {
     systemState = "Комфорт";
     // Проверяем, достигли ли целевой температуры - если да, выключаем вентилятор и переходим в MAINTAIN
     if (homeTemp >= comfortSettings.targetHomeTemp) {
-      fanState = false;
+      setFanDesired(false);
       comfortState = "MAINTAIN";
       comfortStateStartTime = now;
       homeTempAtStateStart = homeTemp;
@@ -3221,9 +3394,9 @@ void handleComfortMode(unsigned long now) {
       float comfortLow = intermediateTemp - comfortSettings.hysteresisBoiler;
       float comfortHigh = intermediateTemp + comfortSettings.hysteresisBoiler;
       if (supplyTemp < comfortLow) {
-        fanState = true;
+        setFanDesired(true);
       } else if (supplyTemp >= comfortHigh) {
-        fanState = false;
+        setFanDesired(false);
       }
       if (stateElapsed > 0 && stateElapsed % comfortSettings.inertiaCheckInterval == 0) {
         float homeTempChange = homeTemp - homeTempAtStateStart;
@@ -3242,21 +3415,21 @@ void handleComfortMode(unsigned long now) {
     systemState = "Поддержание";
     // Если температура дома уже выше целевой с гистерезисом выключения, выключаем вентилятор
     if (homeTemp >= (comfortSettings.targetHomeTemp + comfortSettings.hysteresisOff)) {
-      fanState = false;
+      setFanDesired(false);
     } else if (homeTemp < (comfortSettings.targetHomeTemp - comfortSettings.hysteresisOn)) {
       // Если температура упала ниже целевой, начинаем нагрев
       comfortState = "HEATING_1";
       comfortStateStartTime = now;
       homeTempAtStateStart = homeTemp;
-      fanState = true;
+      setFanDesired(true);
     } else {
       // Поддержание температуры котла в диапазоне
       float maintainLow = maintainTemp - comfortSettings.hysteresisBoiler;
       float maintainHigh = maintainTemp + comfortSettings.hysteresisBoiler;
       if (supplyTemp < maintainLow) {
-        fanState = true;
+        setFanDesired(true);
       } else if (supplyTemp >= maintainHigh) {
-        fanState = false;
+        setFanDesired(false);
       }
     }
   }
@@ -3303,7 +3476,8 @@ void handleWebInterface() {
 
 // API: Получение статуса
 void handleStatus() {
-  DynamicJsonDocument doc(1536);
+  DynamicJsonDocument doc(2048);
+  doc["supplyTemp"] = supplyTemp;
   doc["returnTemp"] = returnTemp;
   doc["boilerTemp"] = boilerTemp;
   doc["outdoorTemp"] = outdoorTemp;
@@ -3312,12 +3486,16 @@ void handleStatus() {
   doc["setpoint"] = setpoint;
   doc["fan"] = fanState;
   doc["pump"] = pumpState;
+  doc["pump2"] = pump2State;
+  doc["circuit1Enabled"] = circuit1Enabled;
+  doc["circuit2Enabled"] = circuit2Enabled;
   doc["systemEnabled"] = systemEnabled;
   doc["state"] = systemState;
   doc["workMode"] = workMode;
   doc["workModeName"] = (workMode == 0) ? "Авто" : "Комфорт";
   doc["homeTempSensorValid"] = isHomeTempSensorValid(millis());  // Статус датчика температуры дома
   doc["homeTempSensorLWTOnline"] = homeTempSensorLWTOnline;  // LWT статус датчика (online/offline)
+  doc["supplyTempValid"] = isSupplyTempValid();
   if (workMode == 1) {
     doc["comfortState"] = comfortState;
     doc["targetHomeTemp"] = comfortSettings.targetHomeTemp;  // Уставка для дома в режиме Комфорт
@@ -3522,11 +3700,22 @@ void handleControl() {
     bool manual = server.hasArg("manual") && server.arg("manual").toInt() == 1;  // Инженерное управление
     
     if (device == "fan") {
-      fanState = state;
-      // Управление реле вентилятора с учетом логики
-      int fanLevel = state ? HIGH : (relaySettings.fanOffIsLow ? LOW : HIGH);
-      digitalWrite(PIN_RELAY_FAN, fanLevel);
-      
+      // Safety wins: запрет ручного ВКЛ при перегреве
+      if (state && isSupplyTempValid()) {
+        float ohLimit = (workMode == 1) ? comfortSettings.warningTemp : autoSettings.overheatTemp;
+        if (supplyTemp >= ohLimit) {
+          DynamicJsonDocument err(256);
+          err["success"] = false;
+          err["error"] = "Overheat protection: fan ON rejected";
+          err["supplyTemp"] = supplyTemp;
+          err["overheatTemp"] = ohLimit;
+          String errResp;
+          serializeJson(err, errResp);
+          server.send(403, "application/json", errResp);
+          return;
+        }
+      }
+      setFanDesired(state);
       if (manual) {
         manualFanControl = true;
         lastManualControlTime = millis();
@@ -3535,26 +3724,36 @@ void handleControl() {
         manualFanControl = false;
         Serial.print("Вентилятор: ");
       }
-      Serial.print(state ? "ВКЛ (HIGH)" : "ВЫКЛ (");
-      Serial.print(relaySettings.fanOffIsLow ? "LOW" : "HIGH");
-      Serial.println(")");
+      Serial.print(state ? "ВКЛ" : "ВЫКЛ");
+      Serial.println();
     } else if (device == "pump") {
-      pumpState = state;
-      // Управление реле насоса с учетом логики
-      int pumpLevel = state ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
-      digitalWrite(PIN_RELAY_PUMP, pumpLevel);
-      
       if (manual) {
         manualPumpControl = true;
         lastManualControlTime = millis();
-        Serial.print("[Инженерное] Насос: ");
+        pumpState = state;
+        int pumpLevel = state ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
+        digitalWrite(PIN_RELAY_PUMP, pumpLevel);
+        Serial.print("[Инженерное] Насос1: ");
       } else {
         manualPumpControl = false;
-        Serial.print("Насос: ");
+        setPumpDesired(state);
+        Serial.print("Насос1: ");
       }
-      Serial.print(state ? "ВКЛ (HIGH)" : "ВЫКЛ (");
-      Serial.print(relaySettings.pumpOffIsLow ? "LOW" : "HIGH");
-      Serial.println(")");
+      Serial.println(state ? "ВКЛ" : "ВЫКЛ");
+    } else if (device == "pump2") {
+      if (manual) {
+        manualPump2Control = true;
+        lastManualControlTime = millis();
+        pump2State = state;
+        int pump2Level = state ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
+        digitalWrite(PIN_RELAY_PUMP2, pump2Level);
+        Serial.print("[Инженерное] Насос2: ");
+      } else {
+        manualPump2Control = false;
+        setPump2Desired(state);
+        Serial.print("Насос2: ");
+      }
+      Serial.println(state ? "ВКЛ" : "ВЫКЛ");
     } else if (device == "sensors") {
       sensorsRelayState = state;
       // Управление реле датчиков с учетом логики (обратная логика вентилятора)
@@ -3571,9 +3770,12 @@ void handleControl() {
         sensorsResetStartTime = millis();
         Serial.println("[Реле датчиков] Запланирован сброс через 500мс");
       }
+    } else {
+      server.send(400, "application/json", "{\"error\":\"Unknown device\"}");
+      return;
     }
     
-    DynamicJsonDocument doc(200);
+    DynamicJsonDocument doc(256);
     doc["success"] = true;
     doc["device"] = device;
     doc["state"] = state;
@@ -3588,13 +3790,17 @@ void handleControl() {
 
 // API: Настройки реле - GET
 void handleRelaySettingsGet() {
-  DynamicJsonDocument doc(256);
+  DynamicJsonDocument doc(384);
   doc["fanOffIsLow"] = relaySettings.fanOffIsLow;
   doc["pumpOffIsLow"] = relaySettings.pumpOffIsLow;
   doc["sensorsOffIsLow"] = relaySettings.sensorsOffIsLow;
   doc["sensorsRelayState"] = sensorsRelayState;
   doc["manualFanControl"] = manualFanControl;
   doc["manualPumpControl"] = manualPumpControl;
+  doc["manualPump2Control"] = manualPump2Control;
+  doc["circuit1Enabled"] = circuit1Enabled;
+  doc["circuit2Enabled"] = circuit2Enabled;
+  doc["pump2"] = pump2State;
   if (lastManualControlTime > 0) {
     unsigned long elapsed = millis() - lastManualControlTime;
     doc["manualControlRemaining"] = (MANUAL_CONTROL_TIMEOUT - elapsed) / 1000;  // секунды
@@ -3660,6 +3866,14 @@ void handleRelaySettingsPost() {
         Serial.println("[Реле] ✓ sensorsOffIsLow изменено");
       }
     }
+    if (doc.containsKey("circuit1Enabled")) {
+      circuit1Enabled = doc["circuit1Enabled"].as<bool>();
+      changed = true;
+    }
+    if (doc.containsKey("circuit2Enabled")) {
+      circuit2Enabled = doc["circuit2Enabled"].as<bool>();
+      changed = true;
+    }
     
     // Сохраняем всегда, даже если значения не изменились (для надежности)
     saveRelaySettingsToEEPROM();
@@ -3667,11 +3881,13 @@ void handleRelaySettingsPost() {
     // Применяем новые настройки к текущему состоянию реле
     syncRelays();
     
-    DynamicJsonDocument responseDoc(256);
+    DynamicJsonDocument responseDoc(384);
     responseDoc["success"] = true;
     responseDoc["fanOffIsLow"] = relaySettings.fanOffIsLow;
     responseDoc["pumpOffIsLow"] = relaySettings.pumpOffIsLow;
     responseDoc["sensorsOffIsLow"] = relaySettings.sensorsOffIsLow;
+    responseDoc["circuit1Enabled"] = circuit1Enabled;
+    responseDoc["circuit2Enabled"] = circuit2Enabled;
     String response;
     serializeJson(responseDoc, response);
     Serial.print("[Реле] Отправка ответа: ");
@@ -3681,6 +3897,57 @@ void handleRelaySettingsPost() {
     Serial.println("[Реле] POST запрос без данных");
     server.send(400, "application/json", "{\"error\":\"No data\"}");
   }
+}
+
+// API: Контуры отопления (GET/POST)
+void handleCircuits() {
+  if (server.method() == HTTP_GET) {
+    DynamicJsonDocument doc(256);
+    doc["circuit1Enabled"] = circuit1Enabled;
+    doc["circuit2Enabled"] = circuit2Enabled;
+    doc["pump"] = pumpState;
+    doc["pump2"] = pump2State;
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+    return;
+  }
+  if (server.method() == HTTP_POST) {
+    if (!server.hasArg("plain")) {
+      server.send(400, "application/json", "{\"error\":\"No data\"}");
+      return;
+    }
+    DynamicJsonDocument doc(256);
+    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+    if (error) {
+      server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+      return;
+    }
+    if (doc.containsKey("circuit1Enabled")) {
+      circuit1Enabled = doc["circuit1Enabled"].as<bool>();
+    }
+    if (doc.containsKey("circuit2Enabled")) {
+      circuit2Enabled = doc["circuit2Enabled"].as<bool>();
+    }
+    saveRelaySettingsToEEPROM();
+    if (mqttSettings.enabled && mqttClient.connected()) {
+      String t1 = mqttSettings.prefix + "/simple/circuit1";
+      String t2 = mqttSettings.prefix + "/simple/circuit2";
+      mqttClient.publish(t1.c_str(), circuit1Enabled ? "1" : "0", true);
+      mqttClient.publish(t2.c_str(), circuit2Enabled ? "1" : "0", true);
+    }
+    DynamicJsonDocument responseDoc(256);
+    responseDoc["success"] = true;
+    responseDoc["circuit1Enabled"] = circuit1Enabled;
+    responseDoc["circuit2Enabled"] = circuit2Enabled;
+    responseDoc["pump"] = pumpState;
+    responseDoc["pump2"] = pump2State;
+    String response;
+    serializeJson(responseDoc, response);
+    server.send(200, "application/json", response);
+    return;
+  }
+  server.send(405, "application/json", "{\"error\":\"Method not allowed\"}");
 }
 
 // API: Настройки Авто - GET
@@ -3999,8 +4266,9 @@ void determineSystemStateOnStartup() {
   // Если система выключена, сбрасываем все таймеры
   if (!systemEnabled) {
     resetAllTimers();
-    fanState = false;
-    pumpState = false;
+    setFanDesired(false);
+    setPumpDesired(false);
+    setPump2Desired(false);
     systemState = "IDLE";
     Serial.println("[STARTUP] Система выключена - все таймеры сброшены");
     return;
@@ -5869,10 +6137,12 @@ void setup() {
   // Инициализация пинов реле
   pinMode(PIN_RELAY_FAN, OUTPUT);
   pinMode(PIN_RELAY_PUMP, OUTPUT);
+  pinMode(PIN_RELAY_PUMP2, OUTPUT);
   pinMode(PIN_RELAY_SENSORS, OUTPUT);
   // Выключено = LOW, включено = HIGH
   digitalWrite(PIN_RELAY_FAN, LOW);
   digitalWrite(PIN_RELAY_PUMP, LOW);
+  digitalWrite(PIN_RELAY_PUMP2, LOW);
   // Реле датчиков по умолчанию включено (питание датчиков)
   sensorsRelayState = true;
   digitalWrite(PIN_RELAY_SENSORS, HIGH);
@@ -6063,6 +6333,8 @@ void setup() {
   server.on("/api/system/reset", HTTP_POST, handleSystemReset);
   server.on("/api/settings/relay", HTTP_GET, handleRelaySettingsGet);
   server.on("/api/settings/relay", HTTP_POST, handleRelaySettingsPost);
+  server.on("/api/circuits", HTTP_GET, handleCircuits);
+  server.on("/api/circuits", HTTP_POST, handleCircuits);
   server.on("/api/settings/auto", HTTP_GET, handleAutoSettingsGet);
   server.on("/api/settings/auto", HTTP_POST, handleAutoSettingsPost);
   server.on("/api/system/mode", HTTP_GET, handleWorkModeGet);
@@ -6269,10 +6541,9 @@ void loop() {
   
   // Управление вентилятором с учетом подброса угля
   if (coalFeedingActive) {
-    // Во время подброса угля вентилятор должен быть выключен
+    // Во время подброса угля вентилятор должен быть выключен (закрывает fan cycle)
     if (fanState) {
-      fanState = false;
-      digitalWrite(PIN_RELAY_FAN, LOW);
+      setFanDesired(false);
     }
   } else if (systemEnabled && !manualFanControl) {
     // Автоматическое управление вентилятором
@@ -6293,7 +6564,7 @@ void loop() {
       // Режим "Авто" - стандартная логика
       // Включаем вентилятор, если температура подачи ниже (уставка - гистерезис)
       // Выключаем, если температура достигла (уставка + гистерезис)
-      if (supplyTemp > 0) {  // Только если есть показания датчика
+      if (isSupplyTempValid()) {
       
       // Управление вентилятором
       // Защита от частых переключений
@@ -6312,52 +6583,70 @@ void loop() {
                            (timeSinceLastToggle >= FAN_TOGGLE_MIN_INTERVAL_MS || lastFanToggleTime == 0) &&
                            (tempDelta >= FAN_TOGGLE_MIN_TEMP_DELTA || lastFanToggleTime == 0);
       
-      if (shouldTurnOn && !boilerExtinguished) {
-        fanState = true;
+      if (shouldTurnOn && !boilerExtinguished && systemState != "HEATING_TIMEOUT" && systemState != "COAL_BURNED") {
+        setFanDesired(true);
         systemState = "HEATING";
-        heatingStartTime = now;  // Запоминаем время начала разогрева
-        fanStartTime = now;  // Запоминаем время начала работы вентилятора
-        maxTempDuringFan = supplyTemp;  // Инициализируем максимальную температуру
+        heatingStartTime = now;
         lastFanToggleTime = now;
         lastFanToggleTemp = supplyTemp;
         fanStats.cycleCount++;
         fanStats.dailyCycleCount++;
         saveFanStatsToEEPROM();
       } else if (shouldTurnOff) {
-        heatingStartTime = 0;  // Сбрасываем таймер разогрева
-        fanState = false;
+        heatingStartTime = 0;
+        setFanDesired(false);
         systemState = "IDLE";
-        fanStartTime = 0;  // Сбрасываем таймер работы вентилятора
-        maxTempDuringFan = 0.0;  // Сбрасываем максимальную температуру
         lastFanToggleTime = now;
         lastFanToggleTemp = supplyTemp;
       }
       
-      // 3. Проверка таймаута разогрева
+      // 3. Проверка таймаута разогрева — SAFE STOP (FAN OFF + soft stop + coast)
       if (heatingStartTime > 0 && fanState) {
         unsigned long heatingElapsed = ((now >= heatingStartTime) ? (now - heatingStartTime) : (ULONG_MAX - heatingStartTime + now)) / 60000;  // минуты
         if (heatingElapsed >= autoSettings.heatingTimeout) {
           if (supplyTemp < autoSettings.setpoint - 5) {
             systemState = "HEATING_TIMEOUT";
+            heatingStartTime = 0;
+            setFanDesired(false);
+            char details[50];
+            snprintf(details, sizeof(details), "T=%.1f set=%.1f t=%dм", supplyTemp, autoSettings.setpoint, autoSettings.heatingTimeout);
+            logEvent("HEATING_TIMEOUT", details);
+            if (mqttSettings.enabled && mqttClient.connected()) {
+              String topic = mqttSettings.prefix + "/event/heating_timeout";
+              mqttClient.publish(topic.c_str(), details, false);
+            }
+            applySystemEnable(false, "heating_timeout");
+            Serial.println("[Котел] HEATING_TIMEOUT: вентилятор выключен, soft stop");
           }
         }
       }
       
-      // 4. Обнаружение прогорания угля (проверяем реже, чтобы не нагружать систему)
+      // 4. Обнаружение прогорания угля → как погасание (FAN OFF + soft stop)
       static unsigned long lastCoalBurnedCheck = 0;
-      if (fanState && supplyTemp > 0 && (now - lastCoalBurnedCheck > 60000 || now < lastCoalBurnedCheck)) {  // Раз в минуту
+      if (fanState && isSupplyTempValid() && (now - lastCoalBurnedCheck > 60000 || now < lastCoalBurnedCheck)) {
         lastCoalBurnedCheck = now;
         int trend = getTemperatureTrend(&supplyHistory);
-        if (trend == -1) {  // Падение температуры
+        if (trend == -1) {
           if (coalBurnedCheckStart == 0) {
             coalBurnedCheckStart = now;
           }
           unsigned long coalElapsed = (now >= coalBurnedCheckStart) ? (now - coalBurnedCheckStart) : (ULONG_MAX - coalBurnedCheckStart + now);
           if (coalElapsed > COAL_BURNED_CHECK_TIME) {
             systemState = "COAL_BURNED";
+            boilerExtinguished = true;
+            setFanDesired(false);
+            char details[50];
+            snprintf(details, sizeof(details), "Падение >10 мин, T=%.1f", supplyTemp);
+            logEvent("COAL_BURNED", details);
+            if (mqttSettings.enabled && mqttClient.connected()) {
+              String topic = mqttSettings.prefix + "/event/coal_burned";
+              mqttClient.publish(topic.c_str(), details, false);
+            }
+            applySystemEnable(false, "coal_burned");
+            Serial.println("[Котел] COAL_BURNED: вентилятор выключен, soft stop");
           }
         } else {
-          coalBurnedCheckStart = 0;  // Сбрасываем если температура не падает
+          coalBurnedCheckStart = 0;
         }
       } else if (!fanState) {
         coalBurnedCheckStart = 0;
@@ -6365,14 +6654,13 @@ void loop() {
       
       // 5. Защита от перегрева
       if (supplyTemp >= autoSettings.overheatTemp) {
-        fanState = false;
+        setFanDesired(false);
         systemState = "OVERHEAT";
         Serial.print("[Безопасность] Перегрев! Температура ");
         Serial.print(supplyTemp);
         Serial.print(" >= ");
         Serial.println(autoSettings.overheatTemp);
       } else if (systemState == "OVERHEAT" && supplyTemp < autoSettings.overheatTemp) {
-        // Восстановление из состояния перегрева
         systemState = "IDLE";
         Serial.println("[Безопасность] Восстановление после перегрева");
       }
