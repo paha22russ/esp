@@ -48,6 +48,8 @@
 
 // Версия прошивки
 #define FIRMWARE_VERSION "4.2.28"
+#define DISCOVERY_UDP_PORT 4210
+#define DISCOVERY_BEACON_INTERVAL_MS 1000
 
 // GitHub репозиторий для обновлений
 #define GITHUB_REPO_OWNER "paha22russ"
@@ -94,6 +96,9 @@ WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP);
+WiFiUDP discoveryUDP;
+bool discoveryUdpReady = false;
+unsigned long lastDiscoveryBeacon = 0;
 
 // OneWire и DallasTemperature для датчиков DS18B20 (две шины)
 OneWire oneWire1(PIN_DS18B20_1);  // Шина 1: Подача, Обратка
@@ -1177,14 +1182,10 @@ void loadSensorMappingFromEEPROM() {
 
 void saveSystemEnabledToEEPROM() {
   EEPROM.begin(EEPROM_SIZE);
-  // Явно 0/1 — не полагаемся на размер bool при put/get
-  uint8_t val = systemEnabled ? 1 : 0;
-  EEPROM.put(EEPROM_ADDR_MAGIC, (uint8_t)EEPROM_MAGIC);
-  EEPROM.put(EEPROM_ADDR_SYSTEM, val);
+  EEPROM.put(EEPROM_ADDR_SYSTEM, systemEnabled);
   EEPROM.commit();
   EEPROM.end();
-  Serial.print("System enabled saved to EEPROM: ");
-  Serial.println(val);
+  Serial.println("System enabled saved to EEPROM");
 }
 
 void loadSystemEnabledFromEEPROM() {
@@ -1193,19 +1194,9 @@ void loadSystemEnabledFromEEPROM() {
   EEPROM.get(EEPROM_ADDR_MAGIC, magic);
   
   if (magic == EEPROM_MAGIC) {
-    uint8_t val = 0xFF;
-    EEPROM.get(EEPROM_ADDR_SYSTEM, val);
-    // Только явная 0 = выкл; любой мусор / 1 = включена (fail-safe)
-    systemEnabled = (val != 0);
-    // Нормализуем повреждённое значение к 0/1
-    if (val != 0 && val != 1) {
-      systemEnabled = true;
-      uint8_t fixed = 1;
-      EEPROM.put(EEPROM_ADDR_SYSTEM, fixed);
-      EEPROM.commit();
-    }
+    EEPROM.get(EEPROM_ADDR_SYSTEM, systemEnabled);
     Serial.print("System enabled loaded from EEPROM: ");
-    Serial.println(systemEnabled ? 1 : 0);
+    Serial.println(systemEnabled);
   } else {
     systemEnabled = true;  // По умолчанию включена
     saveSystemEnabledToEEPROM();
@@ -2187,17 +2178,13 @@ void applySystemEnable(bool enable, const char* source) {
   fanState = false;
   digitalWrite(PIN_RELAY_FAN, relaySettings.fanOffIsLow ? LOW : HIGH);
   
-  // Останавливаем розжиг/подброс, но не сбрасываем историю трендов и таймеры датчиков
+  // Останавливаем розжиг/подброс, но не сбрасываем историю трендов
   ignitionInProgress = false;
   ignitionStartTime = 0;
   coalFeedingActive = false;
   heatingStartTime = 0;
   fanStartTime = 0;
   maxTempDuringFan = 0.0;
-  // Не оставляем «HEATING» после soft-stop — иначе UI/логи путают выкл с работой
-  if (systemState != "КОТЕЛ_ПОГАС" && systemState != "ОШИБКА_РОЗЖИГА") {
-    systemState = "STOPPED";
-  }
   
   saveSystemEnabledToEEPROM();
   
@@ -3316,9 +3303,7 @@ void handleWebInterface() {
 
 // API: Получение статуса
 void handleStatus() {
-  DynamicJsonDocument doc(1792);
-  // supplyTemp был случайно удалён в 4.2.26 — без него UI показывает «--» на подаче
-  doc["supplyTemp"] = supplyTemp;
+  DynamicJsonDocument doc(1536);
   doc["returnTemp"] = returnTemp;
   doc["boilerTemp"] = boilerTemp;
   doc["outdoorTemp"] = outdoorTemp;
@@ -3976,33 +3961,15 @@ void handleIgnition() {
   }
 }
 
-// Сброс управляющих таймеров (НЕ трогаем валидность/обнаружение датчиков —
-// иначе soft-stop + reboot ложно триггерит авто-сброс питания датчиков)
-void resetControlTimers() {
+// Функция сброса всех таймеров при выключении системы
+void resetAllTimers() {
   fanStartTime = 0;
   heatingStartTime = 0;
   coalFeedingStartTime = 0;
   ignitionStartTime = 0;
+  sensorsResetStartTime = 0;
   lastManualControlTime = 0;
   lastAutoSettingsChange = 0;
-  lastPumpRunTime = 0;
-  coalBurnedCheckStart = 0;
-  lastFanToggleTime = 0;
-  maxTempDuringFan = 0.0;
-  boilerExtinguished = false;
-  ignitionInProgress = false;
-  coalFeedingActive = false;
-  pumpCoastActive = false;
-  pumpCoastStartTime = 0;
-  pumpStableSince = 0;
-  systemState = "STOPPED";
-  Serial.println("[TIMERS] Управляющие таймеры сброшены (датчики сохранены)");
-}
-
-// Полный сброс (кнопка/диагностика) — включая таймеры датчиков
-void resetAllTimers() {
-  resetControlTimers();
-  sensorsResetStartTime = 0;
   lastHomeTempUpdate = 0;
   lastSensorsDetectedTime = 0;
   lastValidSupplyTempTime = 0;
@@ -4010,8 +3977,15 @@ void resetAllTimers() {
   lastValidBoilerTempTime = 0;
   lastValidOutdoorTempTime = 0;
   tempRequestTime = 0;
+  lastPumpRunTime = 0;
+  coalBurnedCheckStart = 0;
   wifiScanStartTime = 0;
+  lastFanToggleTime = 0;
   pendingRebootTime = 0;
+  maxTempDuringFan = 0.0;
+  boilerExtinguished = false;
+  ignitionInProgress = false;
+  coalFeedingActive = false;
   sensorsResetPending = false;
   sensorsAutoResetInProgress = false;
   systemState = "IDLE";
@@ -4022,13 +3996,13 @@ void resetAllTimers() {
 void determineSystemStateOnStartup() {
   Serial.println("[STARTUP] Определение состояния системы...");
   
-  // Soft-stop переживает reboot намеренно (EEPROM). Не сбрасываем таймеры датчиков.
+  // Если система выключена, сбрасываем все таймеры
   if (!systemEnabled) {
-    resetControlTimers();
+    resetAllTimers();
     fanState = false;
     pumpState = false;
-    systemState = "STOPPED";
-    Serial.println("[STARTUP] Система выключена (soft-stop) — датчики продолжают опрос");
+    systemState = "IDLE";
+    Serial.println("[STARTUP] Система выключена - все таймеры сброшены");
     return;
   }
   
@@ -6019,10 +5993,23 @@ void setup() {
     // Инициализация mDNS
     if (MDNS.begin("kotel")) {
       Serial.println("[mDNS] mDNS responder started: kotel.local");
-      // Добавляем сервис HTTP
+      // HTTP + отдельный тип _kotel._tcp для быстрого NSD на планшете
       MDNS.addService("http", "tcp", 80);
+      MDNS.addService("kotel", "tcp", 80);
+      MDNS.addServiceTxt("http", "tcp", "fw", FIRMWARE_VERSION);
+      MDNS.addServiceTxt("kotel", "tcp", "fw", FIRMWARE_VERSION);
+      MDNS.addServiceTxt("kotel", "tcp", "path", "/");
     } else {
       Serial.println("[mDNS] Error setting up mDNS responder!");
+    }
+
+    // UDP-маяк для обнаружения панелью за <1–2 с (порт 4210)
+    if (discoveryUDP.begin(DISCOVERY_UDP_PORT)) {
+      discoveryUdpReady = true;
+      Serial.println("[Discovery] UDP beacon on port 4210");
+    } else {
+      discoveryUdpReady = false;
+      Serial.println("[Discovery] UDP beacon bind failed");
     }
   }
   
@@ -6168,6 +6155,25 @@ void loop() {
   ArduinoOTA.handle();
   
   // mDNS обновляется автоматически, не требует явного вызова update()
+
+  // UDP discovery beacon: KOTELESP;<ip>;80;<version> → broadcast :4210
+  if (discoveryUdpReady && WiFi.status() == WL_CONNECTED) {
+    unsigned long beaconElapsed = (lastDiscoveryBeacon == 0) ? DISCOVERY_BEACON_INTERVAL_MS :
+      ((now >= lastDiscoveryBeacon) ? (now - lastDiscoveryBeacon) :
+       (ULONG_MAX - lastDiscoveryBeacon + now));
+    if (beaconElapsed >= DISCOVERY_BEACON_INTERVAL_MS) {
+      lastDiscoveryBeacon = now;
+      IPAddress ip = WiFi.localIP();
+      IPAddress bcast(ip[0], ip[1], ip[2], 255);
+      char msg[96];
+      snprintf(msg, sizeof(msg), "KOTELESP;%u.%u.%u.%u;80;%s",
+               ip[0], ip[1], ip[2], ip[3], FIRMWARE_VERSION);
+      if (discoveryUDP.beginPacket(bcast, DISCOVERY_UDP_PORT)) {
+        discoveryUDP.print(msg);
+        discoveryUDP.endPacket();
+      }
+    }
+  }
   
   server.handleClient();
   

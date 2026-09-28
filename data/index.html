@@ -856,7 +856,7 @@
         <div class="header">
             <div class="header-top">
                 <h1 onclick="showMain(); updateStatus();" title="На главную">🔥 Котел<span id="updateErrorBadge" class="update-error-badge" title="Ошибка обновления — нажмите, чтобы скрыть" onclick="event.stopPropagation(); dismissUpdateResult();">⚠</span></h1>
-                <button class="menu-button" onclick="toggleMenu()" title="Меню">☰</button>
+                <button class="menu-button" onclick="toggleMenu(event)" title="Меню">☰</button>
             </div>
             <div id="updateErrorHint" class="update-error-hint">Ошибка обновления</div>
             <div id="updateSuccessToast" class="update-success-toast">
@@ -1905,9 +1905,46 @@
     </div>
 
     <script>
+        // Полифиллы для WebView Android 7 (Galaxy Tab 2 / 7.1.2)
+        (function() {
+            if (!String.prototype.padStart) {
+                String.prototype.padStart = function(targetLength, padString) {
+                    targetLength = targetLength >> 0;
+                    padString = String(padString || ' ');
+                    if (this.length >= targetLength) return String(this);
+                    targetLength = targetLength - this.length;
+                    if (targetLength > padString.length) {
+                        padString += padString.repeat
+                            ? padString.repeat(targetLength / padString.length)
+                            : Array(targetLength + 1).join(padString);
+                    }
+                    return padString.slice(0, targetLength) + String(this);
+                };
+            }
+            if (!Object.entries) {
+                Object.entries = function(obj) {
+                    var ownProps = Object.keys(obj);
+                    var i = ownProps.length;
+                    var res = new Array(i);
+                    while (i--) res[i] = [ownProps[i], obj[ownProps[i]]];
+                    return res;
+                };
+            }
+            if (!String.prototype.includes) {
+                String.prototype.includes = function(search, start) {
+                    if (typeof start !== 'number') start = 0;
+                    return this.indexOf(search, start) !== -1;
+                };
+            }
+        })();
+
         let updateInterval;
 
-        function toggleMenu() {
+        function toggleMenu(event) {
+            // stopPropagation: на старых WebView (Galaxy Tab / Android 7)
+            // клик по кнопке иначе сразу всплывает в document и закрывает меню.
+            if (event && event.stopPropagation) event.stopPropagation();
+            if (event && event.preventDefault) event.preventDefault();
             const menu = document.getElementById('dropdownMenu');
             if (menu) {
                 menu.classList.toggle('show');
@@ -2111,19 +2148,6 @@
             }
         }
 
-        let apiOnline = true;
-        let apiFailCount = 0;
-
-        function setConnectionOffline() {
-            apiOnline = false;
-            const stateDisplay = document.getElementById('stateDisplay');
-            const statusDot = document.getElementById('statusDot');
-            const statusBar = document.getElementById('systemStatus');
-            if (stateDisplay) stateDisplay.textContent = 'Нет связи';
-            if (statusDot) statusDot.className = 'status-dot danger';
-            if (statusBar) statusBar.textContent = 'offline';
-        }
-
         // Функция обновления стрелочки тренда
         function updateTrendArrow(elementId, trend) {
             const arrow = document.getElementById(elementId);
@@ -2156,12 +2180,8 @@
                 .then(d => {
                     if (!d) {
                         console.error('Empty response from /api/status');
-                        apiFailCount++;
-                        if (apiFailCount >= 2) setConnectionOffline();
                         return;
                     }
-                    apiFailCount = 0;
-                    apiOnline = true;
                     
                     // Определяем режим работы
                     const isComfortMode = (d.workMode === 1);
@@ -2316,7 +2336,7 @@
                     } else {
                         document.body.classList.remove('extinguishing');
                         if (d.systemEnabled === false) {
-                            statusText = 'Система выкл';
+                            statusText = 'Остановлена';
                             statusClass = 'warning';
                         } else if (d.state === 'РОЗЖИГ' || d.ignitionInProgress === true) {
                             statusText = 'Розжиг';
@@ -2539,9 +2559,7 @@
                 })
                 .catch(e => {
                     console.error('Error updating data:', e);
-                    apiFailCount++;
-                    // Не путаем offline контроллера с «Система выкл»
-                    if (apiFailCount >= 2) setConnectionOffline();
+                    // Не блокируем выполнение при ошибке - просто логируем
                 });
         }
 
@@ -2589,7 +2607,10 @@
                 const minutes = Math.floor(remainingSeconds / 60);
                 const seconds = remainingSeconds % 60;
                 if (timeSpan) {
-                    timeSpan.textContent = String(minutes).padStart(2, '0') + ':' + String(seconds).padStart(2, '0');
+                    // padStart нет в очень старых WebView — ручное дополнение нулями
+                    const mm = (minutes < 10 ? '0' : '') + minutes;
+                    const ss = (seconds < 10 ? '0' : '') + seconds;
+                    timeSpan.textContent = mm + ':' + ss;
                 }
                 if (timer) {
                     timer.style.display = 'block';
@@ -4047,15 +4068,22 @@
         }
 
         function saveTunnelSettings() {
+            // Без ?. — иначе весь script падает на WebView Android 7 (Galaxy Tab)
+            function elVal(id, fallback) {
+                var el = document.getElementById(id);
+                if (!el) return fallback;
+                if (el.type === 'checkbox') return !!el.checked;
+                return (el.value != null && el.value !== '') ? el.value : fallback;
+            }
             const data = {
-                enabled: !!document.getElementById('tunnelEnabled')?.checked,
-                vpsHost: document.getElementById('tunnelVpsHost')?.value || '',
-                vpsPort: parseInt(document.getElementById('tunnelVpsPort')?.value || '7000'),
-                authToken: document.getElementById('tunnelAuthToken')?.value || '',
-                tunnelName: document.getElementById('tunnelName')?.value || 'esp_kotel',
-                remotePort: parseInt(document.getElementById('tunnelRemotePort')?.value || '18080'),
-                localTargetPort: parseInt(document.getElementById('tunnelLocalPort')?.value || '80'),
-                publicUrl: document.getElementById('tunnelPublicUrl')?.value || ''
+                enabled: !!elVal('tunnelEnabled', false),
+                vpsHost: elVal('tunnelVpsHost', ''),
+                vpsPort: parseInt(elVal('tunnelVpsPort', '7000'), 10),
+                authToken: elVal('tunnelAuthToken', ''),
+                tunnelName: elVal('tunnelName', 'esp_kotel'),
+                remotePort: parseInt(elVal('tunnelRemotePort', '18080'), 10),
+                localTargetPort: parseInt(elVal('tunnelLocalPort', '80'), 10),
+                publicUrl: elVal('tunnelPublicUrl', '')
             };
 
             fetch('/api/tunnel/settings', {
@@ -4081,18 +4109,20 @@
 
         function downloadFrpcConfig() {
             fetch('/api/tunnel/frpc-config')
-                .then(async (r) => {
+                .then(function(r) {
                     if (!r.ok) {
-                        let err = 'Не удалось получить конфиг';
-                        try {
-                            const j = await r.json();
-                            err = j.error || err;
-                        } catch (_) {}
-                        throw new Error(err);
+                        return r.json().then(function(j) {
+                            throw new Error((j && j.error) ? j.error : 'Не удалось получить конфиг');
+                        }).catch(function(e) {
+                            if (e && e.message && e.message.indexOf('Не удалось') === -1 && !(e instanceof SyntaxError)) {
+                                throw e;
+                            }
+                            throw new Error('Не удалось получить конфиг');
+                        });
                     }
                     return r.text();
                 })
-                .then(cfg => {
+                .then(function(cfg) {
                     const blob = new Blob([cfg], { type: 'text/plain;charset=utf-8' });
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
@@ -4103,9 +4133,9 @@
                     document.body.removeChild(a);
                     URL.revokeObjectURL(url);
                 })
-                .catch(e => {
+                .catch(function(e) {
                     console.error('Error downloading frpc config:', e);
-                    alert('Ошибка: ' + e.message);
+                    alert('Ошибка: ' + (e && e.message ? e.message : e));
                 });
         }
     </script>
