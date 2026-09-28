@@ -32,6 +32,43 @@
             background: #3a2a1a;
         }
 
+        .update-error-badge {
+            display: none;
+            color: #f5c542;
+            font-size: 0.85em;
+            margin-left: 6px;
+            cursor: pointer;
+            vertical-align: middle;
+        }
+        .update-error-badge.show { display: inline; }
+        .update-error-hint {
+            display: none;
+            font-size: 0.75em;
+            color: #f5c542;
+            margin-top: 4px;
+            font-weight: 500;
+        }
+        .update-error-hint.show { display: block; }
+        .update-success-toast {
+            display: none;
+            margin: 6px 0 0;
+            padding: 8px 12px;
+            border-radius: 8px;
+            background: rgba(40, 167, 69, 0.18);
+            border: 1px solid rgba(40, 167, 69, 0.45);
+            color: #9fdfb0;
+            font-size: 0.85em;
+        }
+        .update-success-toast.show { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .update-success-toast button {
+            background: transparent;
+            border: none;
+            color: #9fdfb0;
+            cursor: pointer;
+            font-size: 1.1em;
+            padding: 0 4px;
+        }
+
         .container {
             max-width: 100%;
             width: 100%;
@@ -818,8 +855,13 @@
     <div class="container">
         <div class="header">
             <div class="header-top">
-                <h1 onclick="showMain(); updateStatus();" title="На главную">🔥 Котел</h1>
+                <h1 onclick="showMain(); updateStatus();" title="На главную">🔥 Котел<span id="updateErrorBadge" class="update-error-badge" title="Ошибка обновления — нажмите, чтобы скрыть" onclick="event.stopPropagation(); dismissUpdateResult();">⚠</span></h1>
                 <button class="menu-button" onclick="toggleMenu()" title="Меню">☰</button>
+            </div>
+            <div id="updateErrorHint" class="update-error-hint">Ошибка обновления</div>
+            <div id="updateSuccessToast" class="update-success-toast">
+                <span id="updateSuccessText">Обновление установлено</span>
+                <button type="button" title="Скрыть" onclick="dismissUpdateResult()">×</button>
             </div>
             <div class="dropdown-menu" id="dropdownMenu">
                 <div class="dropdown-item" onclick="showSettings('auto')">⚙️ Режим Авто</div>
@@ -2390,6 +2432,11 @@
                         }
                     }
                     
+                    // Результат OTA после перезагрузки
+                    if (typeof updateUpdateResultBanner === 'function') {
+                        updateUpdateResultBanner(d.updateResult);
+                    }
+                    
                     // Обновление статуса подброса угля
                     if (d.coalFeeding !== undefined) {
                         updateCoalFeedingStatus(d.coalFeeding, d.coalFeedingRemaining || 0);
@@ -3754,6 +3801,59 @@
         }
 
         // Функции для работы с обновлениями
+        let updateSuccessToastTimer = null;
+
+        function updateUpdateResultBanner(ur) {
+            const badge = document.getElementById('updateErrorBadge');
+            const hint = document.getElementById('updateErrorHint');
+            const toast = document.getElementById('updateSuccessToast');
+            const toastText = document.getElementById('updateSuccessText');
+            if (!badge || !hint || !toast) return;
+
+            const hasError = ur && (ur.hasError === true || ur.status === 'fail');
+            const hasSuccess = ur && (ur.hasSuccess === true || ur.status === 'success');
+
+            if (hasError) {
+                badge.classList.add('show');
+                hint.classList.add('show');
+                const detail = (ur && ur.message) ? ur.message : 'Ошибка обновления';
+                const ver = (ur && ur.toVersion) ? (' → ' + ur.toVersion) : '';
+                hint.textContent = 'Ошибка обновления' + (detail ? (': ' + detail) : '') + ver;
+                badge.title = hint.textContent + ' (нажмите, чтобы скрыть)';
+                toast.classList.remove('show');
+            } else {
+                badge.classList.remove('show');
+                hint.classList.remove('show');
+            }
+
+            if (hasSuccess && !hasError) {
+                const fromV = (ur && ur.fromVersion) ? ur.fromVersion : '';
+                const toV = (ur && ur.toVersion) ? ur.toVersion : '';
+                let text = 'Обновление установлено';
+                if (fromV && toV) text = 'Обновлено: ' + fromV + ' → ' + toV;
+                else if (toV) text = 'Установлена версия ' + toV;
+                if (toastText) toastText.textContent = text;
+                toast.classList.add('show');
+                if (updateSuccessToastTimer) clearTimeout(updateSuccessToastTimer);
+                // Ненавязчиво: через 90 сек прячем визуально, на сервере останется до auto-clear / ack
+                updateSuccessToastTimer = setTimeout(function() {
+                    toast.classList.remove('show');
+                }, 90000);
+            } else if (!hasSuccess) {
+                toast.classList.remove('show');
+            }
+        }
+
+        function dismissUpdateResult() {
+            const badge = document.getElementById('updateErrorBadge');
+            const hint = document.getElementById('updateErrorHint');
+            const toast = document.getElementById('updateSuccessToast');
+            if (badge) badge.classList.remove('show');
+            if (hint) hint.classList.remove('show');
+            if (toast) toast.classList.remove('show');
+            fetch('/api/update/ack', { method: 'POST' }).catch(function() {});
+        }
+
         function checkForUpdates() {
             const statusEl = document.getElementById('updateStatus');
             const installBtn = document.getElementById('installUpdateBtn');

@@ -6,6 +6,7 @@
 #include <FS.h>
 #include <SPIFFS.h>
 #include <EEPROM.h>
+#include <Preferences.h>
 #include <PubSubClient.h>
 #include <U8g2lib.h>
 #include <ArduinoOTA.h>
@@ -46,7 +47,7 @@
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.25"
+#define FIRMWARE_VERSION "4.2.26"
 
 // GitHub репозиторий для обновлений
 #define GITHUB_REPO_OWNER "paha22russ"
@@ -364,12 +365,12 @@ struct UpdateSettings {
 // Настройки туннеля через VPS (используются внешним агентом на ПК в локальной сети)
 struct TunnelSettings {
   bool enabled = true;
-  String vpsHost = "72.56.101.71";
+  String vpsHost = "185.34.23.203";
   int vpsPort = 7000;
   String authToken = "d64e99e3bcbe489295343b52bb296fea";
   int remotePort = 18080;
   int localTargetPort = 80;
-  String publicUrl = "http://72.56.101.71:18080";
+  String publicUrl = "http://185.34.23.203:18080";
   String tunnelName = "esp_kotel";
 } tunnelSettings;
 
@@ -384,6 +385,25 @@ struct UpdateProgress {
   unsigned long totalBytes = 0;  // Всего байт
   float speedKBps = 0.0;  // Скорость загрузки в KB/s
 } updateProgress;
+
+// Результат последнего OTA (NVS — переживает прошивку и SPIFFS)
+enum OtaResultStatus : uint8_t {
+  OTA_RES_NONE = 0,
+  OTA_RES_SUCCESS = 1,
+  OTA_RES_FAIL = 2,
+  OTA_RES_PENDING = 3
+};
+
+struct OtaResultState {
+  uint8_t status = OTA_RES_NONE;
+  char fromVersion[16] = {0};
+  char toVersion[16] = {0};
+  char message[96] = {0};
+  uint32_t bootCountAtSave = 0;
+} otaResult;
+
+Preferences otaPrefs;
+const unsigned long OTA_SUCCESS_AUTO_CLEAR_MS = 45UL * 60UL * 1000UL;  // успех висит ~45 мин после загрузки
 
 // Структура для привязки датчиков
 struct SensorMapping {
@@ -432,6 +452,10 @@ void updatePumpLogic(unsigned long now);
 void publishSystemEnabledMqtt();
 void queueSystemEnabledMqtt();
 bool parseMqttOnOff(const String& message, bool& enableOut);
+void saveOtaResult(uint8_t status, const char* fromVer, const char* toVer, const char* message);
+void loadOtaResult();
+void clearOtaResult();
+void handleUpdateAck();
 void handleTunnelSettingsGet();
 void handleTunnelSettingsPost();
 void handleTunnelFrpcConfig();
@@ -3274,8 +3298,7 @@ void handleWebInterface() {
 
 // API: Получение статуса
 void handleStatus() {
-  DynamicJsonDocument doc(1024);
-  doc["supplyTemp"] = supplyTemp;
+  DynamicJsonDocument doc(1536);
   doc["returnTemp"] = returnTemp;
   doc["boilerTemp"] = boilerTemp;
   doc["outdoorTemp"] = outdoorTemp;
@@ -3295,6 +3318,21 @@ void handleStatus() {
     doc["targetHomeTemp"] = comfortSettings.targetHomeTemp;  // Уставка для дома в режиме Комфорт
   }
   doc["firmwareVersion"] = FIRMWARE_VERSION;
+  {
+    // Автоочистка успешного баннера через ~45 мин после загрузки
+    if (otaResult.status == OTA_RES_SUCCESS && millis() > OTA_SUCCESS_AUTO_CLEAR_MS) {
+      clearOtaResult();
+    }
+    JsonObject ur = doc.createNestedObject("updateResult");
+    ur["status"] = (otaResult.status == OTA_RES_SUCCESS) ? "success"
+                 : (otaResult.status == OTA_RES_FAIL) ? "fail"
+                 : (otaResult.status == OTA_RES_PENDING) ? "pending" : "none";
+    ur["fromVersion"] = otaResult.fromVersion;
+    ur["toVersion"] = otaResult.toVersion;
+    ur["message"] = otaResult.message;
+    ur["hasError"] = (otaResult.status == OTA_RES_FAIL);
+    ur["hasSuccess"] = (otaResult.status == OTA_RES_SUCCESS);
+  }
   doc["wifiStatus"] = WiFi.status() == WL_CONNECTED ? "Подключен" : "Отключен";
   doc["wifiRSSI"] = WiFi.RSSI();
   doc["mqttStatus"] = (mqttSettings.enabled && mqttClient.connected()) ? "Подключен" : (mqttSettings.enabled ? "Отключен" : "Выключен");
@@ -4557,6 +4595,87 @@ String buildFrpcConfig() {
   return cfg;
 }
 
+void saveOtaResult(uint8_t status, const char* fromVer, const char* toVer, const char* message) {
+  otaResult.status = status;
+  strncpy(otaResult.fromVersion, fromVer ? fromVer : "", sizeof(otaResult.fromVersion) - 1);
+  otaResult.fromVersion[sizeof(otaResult.fromVersion) - 1] = '\0';
+  strncpy(otaResult.toVersion, toVer ? toVer : "", sizeof(otaResult.toVersion) - 1);
+  otaResult.toVersion[sizeof(otaResult.toVersion) - 1] = '\0';
+  strncpy(otaResult.message, message ? message : "", sizeof(otaResult.message) - 1);
+  otaResult.message[sizeof(otaResult.message) - 1] = '\0';
+  otaResult.bootCountAtSave = bootCount;
+
+  if (otaPrefs.begin("ota", false)) {
+    otaPrefs.putUChar("status", otaResult.status);
+    otaPrefs.putString("from", otaResult.fromVersion);
+    otaPrefs.putString("to", otaResult.toVersion);
+    otaPrefs.putString("msg", otaResult.message);
+    otaPrefs.putUInt("boot", otaResult.bootCountAtSave);
+    otaPrefs.end();
+  }
+
+  if (status == OTA_RES_FAIL) {
+    logEvent("OTA_FAILED", otaResult.message);
+  } else if (status == OTA_RES_SUCCESS) {
+    logEvent("OTA_SUCCESS", otaResult.toVersion);
+  }
+}
+
+void loadOtaResult() {
+  otaResult.status = OTA_RES_NONE;
+  otaResult.fromVersion[0] = '\0';
+  otaResult.toVersion[0] = '\0';
+  otaResult.message[0] = '\0';
+  otaResult.bootCountAtSave = 0;
+
+  if (!otaPrefs.begin("ota", true)) {
+    return;
+  }
+  otaResult.status = otaPrefs.getUChar("status", OTA_RES_NONE);
+  String from = otaPrefs.getString("from", "");
+  String to = otaPrefs.getString("to", "");
+  String msg = otaPrefs.getString("msg", "");
+  otaResult.bootCountAtSave = otaPrefs.getUInt("boot", 0);
+  otaPrefs.end();
+
+  strncpy(otaResult.fromVersion, from.c_str(), sizeof(otaResult.fromVersion) - 1);
+  strncpy(otaResult.toVersion, to.c_str(), sizeof(otaResult.toVersion) - 1);
+  strncpy(otaResult.message, msg.c_str(), sizeof(otaResult.message) - 1);
+
+  // Обновление началось, но SUCCESS не записали — считаем ошибкой
+  if (otaResult.status == OTA_RES_PENDING) {
+    saveOtaResult(OTA_RES_FAIL,
+                  otaResult.fromVersion,
+                  otaResult.toVersion,
+                  "Прервано во время обновления");
+    Serial.println("[Update] PENDING → FAIL after reboot");
+  }
+
+  Serial.print("[Update] Loaded OTA result status=");
+  Serial.println(otaResult.status);
+}
+
+void clearOtaResult() {
+  otaResult.status = OTA_RES_NONE;
+  otaResult.fromVersion[0] = '\0';
+  otaResult.toVersion[0] = '\0';
+  otaResult.message[0] = '\0';
+  otaResult.bootCountAtSave = 0;
+  if (otaPrefs.begin("ota", false)) {
+    otaPrefs.clear();
+    otaPrefs.end();
+  }
+}
+
+void handleUpdateAck() {
+  clearOtaResult();
+  DynamicJsonDocument doc(128);
+  doc["success"] = true;
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
 // Проверка обновлений через GitHub
 String checkForUpdates() {
   // Проверяем WiFi соединение
@@ -4698,6 +4817,7 @@ bool downloadAndInstallUpdate(String version) {
   HTTPClient http;
   
   Serial.println("[Update] Starting update download...");
+  saveOtaResult(OTA_RES_PENDING, FIRMWARE_VERSION, version.c_str(), "Идёт обновление...");
   
   // Инициализация прогресса обновления
   updateProgress.isUpdating = true;
@@ -4720,6 +4840,8 @@ bool downloadAndInstallUpdate(String version) {
   Serial.println("[Update] Step 1: Downloading firmware...");
   if (!http.begin(client, GITHUB_FIRMWARE_URL)) {
     Serial.println("[Update] Failed to connect to GitHub for firmware");
+    updateProgress.message = "Нет связи с GitHub";
+    saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
     esp_task_wdt_add(NULL);
     return false;
   }
@@ -4739,6 +4861,8 @@ bool downloadAndInstallUpdate(String version) {
       // Начинаем обновление прошивки
       if (!Update.begin(contentLength, U_FLASH)) {
         Serial.println("[Update] Not enough space to begin firmware OTA");
+        updateProgress.message = "Недостаточно места во flash";
+        saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
         http.end();
         esp_task_wdt_add(NULL);
         return false;
@@ -4771,6 +4895,8 @@ bool downloadAndInstallUpdate(String version) {
               Serial.print(", wrote ");
               Serial.println(writtenBytes);
               Update.abort();
+              updateProgress.message = "Ошибка записи прошивки";
+              saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
               http.end();
               esp_task_wdt_add(NULL);
               return false;
@@ -4829,6 +4955,8 @@ bool downloadAndInstallUpdate(String version) {
             Serial.print(timeSinceData / 1000);
             Serial.println(" seconds ago");
             Update.abort();  // Отменяем обновление
+            updateProgress.message = "Таймаут загрузки прошивки";
+            saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
             http.end();
             esp_task_wdt_add(NULL);
             return false;
@@ -4846,6 +4974,8 @@ bool downloadAndInstallUpdate(String version) {
         Serial.print(written);
         Serial.println(" bytes");
         Update.abort();  // Отменяем обновление
+        updateProgress.message = "Загрузка прошивки неполная";
+        saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
         http.end();
         esp_task_wdt_add(NULL);
         return false;
@@ -4859,6 +4989,8 @@ bool downloadAndInstallUpdate(String version) {
         Serial.println("[Update] Firmware update failed during finalization!");
         Serial.print("[Update] Error: ");
         Serial.println(Update.errorString());
+        updateProgress.message = String("Финал прошивки: ") + Update.errorString();
+        saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
         http.end();
         esp_task_wdt_add(NULL);
         return false;
@@ -5034,6 +5166,7 @@ bool downloadAndInstallUpdate(String version) {
   
   if (success) {
     Serial.println("[Update] All updates complete! Rebooting...");
+    saveOtaResult(OTA_RES_SUCCESS, FIRMWARE_VERSION, version.c_str(), "Обновление установлено");
     updateProgress.percent = 100;
     updateProgress.message = "Обновление завершено! Перезагрузка...";
     u8g2.clearBuffer();
@@ -5045,7 +5178,10 @@ bool downloadAndInstallUpdate(String version) {
     return true;
   } else {
     updateProgress.isUpdating = false;
-    updateProgress.message = "Ошибка обновления";
+    if (updateProgress.message.length() == 0) {
+      updateProgress.message = "Ошибка обновления";
+    }
+    saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
     esp_task_wdt_add(NULL);  // Возвращаем watchdog обратно
     return false;
   }
@@ -5116,7 +5252,10 @@ void handleUpdateInstall() {
   } else {
     Serial.println("[Update] Update failed!");
     updateProgress.isUpdating = false;
-    updateProgress.message = "Ошибка обновления";
+    if (updateProgress.message.length() == 0) {
+      updateProgress.message = "Ошибка обновления";
+    }
+    // saveOtaResult уже вызван внутри downloadAndInstallUpdate
   }
 }
 
@@ -5808,6 +5947,7 @@ void setup() {
   loadBootLogFromEEPROM();
   loadEventLogFromEEPROM();
   loadFanStatsFromEEPROM();
+  loadOtaResult();
   
   // Определение состояния системы при запуске
   determineSystemStateOnStartup();
@@ -5940,6 +6080,7 @@ void setup() {
   server.on("/api/update/check", HTTP_GET, handleUpdateCheck);
   server.on("/api/update/install", HTTP_POST, handleUpdateInstall);
   server.on("/api/update/progress", HTTP_GET, handleUpdateProgress);
+  server.on("/api/update/ack", HTTP_POST, handleUpdateAck);
   server.on("/api/update/settings", HTTP_GET, handleUpdateSettingsGet);
   server.on("/api/update/settings", HTTP_POST, handleUpdateSettingsPost);
   server.on("/api/tunnel/settings", HTTP_GET, handleTunnelSettingsGet);
