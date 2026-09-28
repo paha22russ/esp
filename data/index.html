@@ -2111,6 +2111,19 @@
             }
         }
 
+        let apiOnline = true;
+        let apiFailCount = 0;
+
+        function setConnectionOffline() {
+            apiOnline = false;
+            const stateDisplay = document.getElementById('stateDisplay');
+            const statusDot = document.getElementById('statusDot');
+            const statusBar = document.getElementById('systemStatus');
+            if (stateDisplay) stateDisplay.textContent = 'Нет связи';
+            if (statusDot) statusDot.className = 'status-dot danger';
+            if (statusBar) statusBar.textContent = 'offline';
+        }
+
         // Функция обновления стрелочки тренда
         function updateTrendArrow(elementId, trend) {
             const arrow = document.getElementById(elementId);
@@ -2143,8 +2156,12 @@
                 .then(d => {
                     if (!d) {
                         console.error('Empty response from /api/status');
+                        apiFailCount++;
+                        if (apiFailCount >= 2) setConnectionOffline();
                         return;
                     }
+                    apiFailCount = 0;
+                    apiOnline = true;
                     
                     // Определяем режим работы
                     const isComfortMode = (d.workMode === 1);
@@ -2299,7 +2316,7 @@
                     } else {
                         document.body.classList.remove('extinguishing');
                         if (d.systemEnabled === false) {
-                            statusText = 'Остановлена';
+                            statusText = 'Система выкл';
                             statusClass = 'warning';
                         } else if (d.state === 'РОЗЖИГ' || d.ignitionInProgress === true) {
                             statusText = 'Розжиг';
@@ -2522,7 +2539,9 @@
                 })
                 .catch(e => {
                     console.error('Error updating data:', e);
-                    // Не блокируем выполнение при ошибке - просто логируем
+                    apiFailCount++;
+                    // Не путаем offline контроллера с «Система выкл»
+                    if (apiFailCount >= 2) setConnectionOffline();
                 });
         }
 

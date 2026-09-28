@@ -47,7 +47,7 @@
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.27"
+#define FIRMWARE_VERSION "4.2.28"
 
 // GitHub репозиторий для обновлений
 #define GITHUB_REPO_OWNER "paha22russ"
@@ -1177,10 +1177,14 @@ void loadSensorMappingFromEEPROM() {
 
 void saveSystemEnabledToEEPROM() {
   EEPROM.begin(EEPROM_SIZE);
-  EEPROM.put(EEPROM_ADDR_SYSTEM, systemEnabled);
+  // Явно 0/1 — не полагаемся на размер bool при put/get
+  uint8_t val = systemEnabled ? 1 : 0;
+  EEPROM.put(EEPROM_ADDR_MAGIC, (uint8_t)EEPROM_MAGIC);
+  EEPROM.put(EEPROM_ADDR_SYSTEM, val);
   EEPROM.commit();
   EEPROM.end();
-  Serial.println("System enabled saved to EEPROM");
+  Serial.print("System enabled saved to EEPROM: ");
+  Serial.println(val);
 }
 
 void loadSystemEnabledFromEEPROM() {
@@ -1189,9 +1193,19 @@ void loadSystemEnabledFromEEPROM() {
   EEPROM.get(EEPROM_ADDR_MAGIC, magic);
   
   if (magic == EEPROM_MAGIC) {
-    EEPROM.get(EEPROM_ADDR_SYSTEM, systemEnabled);
+    uint8_t val = 0xFF;
+    EEPROM.get(EEPROM_ADDR_SYSTEM, val);
+    // Только явная 0 = выкл; любой мусор / 1 = включена (fail-safe)
+    systemEnabled = (val != 0);
+    // Нормализуем повреждённое значение к 0/1
+    if (val != 0 && val != 1) {
+      systemEnabled = true;
+      uint8_t fixed = 1;
+      EEPROM.put(EEPROM_ADDR_SYSTEM, fixed);
+      EEPROM.commit();
+    }
     Serial.print("System enabled loaded from EEPROM: ");
-    Serial.println(systemEnabled);
+    Serial.println(systemEnabled ? 1 : 0);
   } else {
     systemEnabled = true;  // По умолчанию включена
     saveSystemEnabledToEEPROM();
@@ -2173,13 +2187,17 @@ void applySystemEnable(bool enable, const char* source) {
   fanState = false;
   digitalWrite(PIN_RELAY_FAN, relaySettings.fanOffIsLow ? LOW : HIGH);
   
-  // Останавливаем розжиг/подброс, но не сбрасываем историю трендов
+  // Останавливаем розжиг/подброс, но не сбрасываем историю трендов и таймеры датчиков
   ignitionInProgress = false;
   ignitionStartTime = 0;
   coalFeedingActive = false;
   heatingStartTime = 0;
   fanStartTime = 0;
   maxTempDuringFan = 0.0;
+  // Не оставляем «HEATING» после soft-stop — иначе UI/логи путают выкл с работой
+  if (systemState != "КОТЕЛ_ПОГАС" && systemState != "ОШИБКА_РОЗЖИГА") {
+    systemState = "STOPPED";
+  }
   
   saveSystemEnabledToEEPROM();
   
@@ -3298,7 +3316,9 @@ void handleWebInterface() {
 
 // API: Получение статуса
 void handleStatus() {
-  DynamicJsonDocument doc(1536);
+  DynamicJsonDocument doc(1792);
+  // supplyTemp был случайно удалён в 4.2.26 — без него UI показывает «--» на подаче
+  doc["supplyTemp"] = supplyTemp;
   doc["returnTemp"] = returnTemp;
   doc["boilerTemp"] = boilerTemp;
   doc["outdoorTemp"] = outdoorTemp;
@@ -3956,15 +3976,33 @@ void handleIgnition() {
   }
 }
 
-// Функция сброса всех таймеров при выключении системы
-void resetAllTimers() {
+// Сброс управляющих таймеров (НЕ трогаем валидность/обнаружение датчиков —
+// иначе soft-stop + reboot ложно триггерит авто-сброс питания датчиков)
+void resetControlTimers() {
   fanStartTime = 0;
   heatingStartTime = 0;
   coalFeedingStartTime = 0;
   ignitionStartTime = 0;
-  sensorsResetStartTime = 0;
   lastManualControlTime = 0;
   lastAutoSettingsChange = 0;
+  lastPumpRunTime = 0;
+  coalBurnedCheckStart = 0;
+  lastFanToggleTime = 0;
+  maxTempDuringFan = 0.0;
+  boilerExtinguished = false;
+  ignitionInProgress = false;
+  coalFeedingActive = false;
+  pumpCoastActive = false;
+  pumpCoastStartTime = 0;
+  pumpStableSince = 0;
+  systemState = "STOPPED";
+  Serial.println("[TIMERS] Управляющие таймеры сброшены (датчики сохранены)");
+}
+
+// Полный сброс (кнопка/диагностика) — включая таймеры датчиков
+void resetAllTimers() {
+  resetControlTimers();
+  sensorsResetStartTime = 0;
   lastHomeTempUpdate = 0;
   lastSensorsDetectedTime = 0;
   lastValidSupplyTempTime = 0;
@@ -3972,15 +4010,8 @@ void resetAllTimers() {
   lastValidBoilerTempTime = 0;
   lastValidOutdoorTempTime = 0;
   tempRequestTime = 0;
-  lastPumpRunTime = 0;
-  coalBurnedCheckStart = 0;
   wifiScanStartTime = 0;
-  lastFanToggleTime = 0;
   pendingRebootTime = 0;
-  maxTempDuringFan = 0.0;
-  boilerExtinguished = false;
-  ignitionInProgress = false;
-  coalFeedingActive = false;
   sensorsResetPending = false;
   sensorsAutoResetInProgress = false;
   systemState = "IDLE";
@@ -3991,13 +4022,13 @@ void resetAllTimers() {
 void determineSystemStateOnStartup() {
   Serial.println("[STARTUP] Определение состояния системы...");
   
-  // Если система выключена, сбрасываем все таймеры
+  // Soft-stop переживает reboot намеренно (EEPROM). Не сбрасываем таймеры датчиков.
   if (!systemEnabled) {
-    resetAllTimers();
+    resetControlTimers();
     fanState = false;
     pumpState = false;
-    systemState = "IDLE";
-    Serial.println("[STARTUP] Система выключена - все таймеры сброшены");
+    systemState = "STOPPED";
+    Serial.println("[STARTUP] Система выключена (soft-stop) — датчики продолжают опрос");
     return;
   }
   
