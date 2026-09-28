@@ -1004,6 +1004,32 @@
                 </div>
             </div>
 
+            <!-- Отключение насосов (контуры) -->
+            <div style="background: #2a2a2a; border-radius: 12px; padding: 12px; margin: 8px 0;">
+                <div style="font-size: 0.85em; color: #aaa; margin-bottom: 10px; text-align: center;">Насосы — отключение контуров</div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                    <div style="text-align: center;">
+                        <div style="font-size: 0.8em; color: #ccc; margin-bottom: 4px;">Контур 1 (дом)</div>
+                        <div id="circuit1StatusText" style="font-size: 0.75em; font-weight: 600; margin-bottom: 8px; color: #00ff00;">РАЗРЕШЁН</div>
+                        <div style="display: flex; gap: 6px;">
+                            <button type="button" class="btn btn-danger" onclick="setCircuit(1, false)" style="flex: 1; padding: 8px 4px; font-size: 0.8em;">Отключить</button>
+                            <button type="button" class="btn btn-success" onclick="setCircuit(1, true)" style="flex: 1; padding: 8px 4px; font-size: 0.8em;">Вкл</button>
+                        </div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="font-size: 0.8em; color: #ccc; margin-bottom: 4px;">Контур 2</div>
+                        <div id="circuit2StatusText" style="font-size: 0.75em; font-weight: 600; margin-bottom: 8px; color: #00ff00;">РАЗРЕШЁН</div>
+                        <div style="display: flex; gap: 6px;">
+                            <button type="button" class="btn btn-danger" onclick="setCircuit(2, false)" style="flex: 1; padding: 8px 4px; font-size: 0.8em;">Отключить</button>
+                            <button type="button" class="btn btn-success" onclick="setCircuit(2, true)" style="flex: 1; padding: 8px 4px; font-size: 0.8em;">Вкл</button>
+                        </div>
+                    </div>
+                </div>
+                <div style="font-size: 0.7em; color: #666; margin-top: 8px; text-align: center; line-height: 1.35;">
+                    Отключение контура останавливает насос. При росте подачи защита может включить насосы принудительно.
+                </div>
+            </div>
+
             <!-- Управление: Система и Подброс угля -->
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0;">
                 <!-- Система вкл/выкл -->
@@ -1162,13 +1188,19 @@
                             • <code class="mqtt-topic" id="mqttTopicEnabled" style="color: #3498DB; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/simple/enabled</code> - статус системы<br>
                             • <code class="mqtt-topic" id="mqttTopicSetpoint" style="color: #3498DB; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/simple/setpoint</code> - текущая уставка<br>
                             • <code class="mqtt-topic" id="mqttTopicState" style="color: #3498DB; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/state</code> - полное состояние (JSON)<br>
-                            • <code class="mqtt-topic" id="mqttTopicCoalFeeding" style="color: #3498DB; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/coalFeeding</code> - статус подброса угля
+                            • <code class="mqtt-topic" id="mqttTopicCoalFeeding" style="color: #3498DB; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/coalFeeding</code> - статус подброса угля<br>
+                            • <code class="mqtt-topic" id="mqttTopicPump" style="color: #3498DB; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/simple/pump</code> - насос 1 (факт)<br>
+                            • <code class="mqtt-topic" id="mqttTopicPump2" style="color: #3498DB; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/simple/pump2</code> - насос 2 (факт)<br>
+                            • <code class="mqtt-topic" id="mqttTopicCircuit1" style="color: #3498DB; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/simple/circuit1</code> - контур 1 разрещён (1/0)<br>
+                            • <code class="mqtt-topic" id="mqttTopicCircuit2" style="color: #3498DB; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/simple/circuit2</code> - контур 2 разрещён (1/0)
                         </div>
                         <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-color);">
                             <strong>📥 Подписка (принимает команды):</strong><br>
                             • <code class="mqtt-topic" id="mqttTopicSetpointSet" style="color: #27AE60; font-weight: bold; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/setpoint/set</code> - <strong>изменить уставку</strong><br>
                             • <code class="mqtt-topic" id="mqttTopicSystemSet" style="color: #27AE60; font-weight: bold; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/system/set</code> - <strong>вкл/выкл системы</strong> (1/0, on/off)<br>
                             • <code class="mqtt-topic" id="mqttTopicSystemSetAlt" style="color: #27AE60; font-weight: bold; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/simple/enabled/set</code> - вкл/выкл (альтернатива)<br>
+                            • <code class="mqtt-topic" id="mqttTopicCircuit1Set" style="color: #27AE60; font-weight: bold; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/circuit1/set</code> - <strong>контур 1 / насос 1</strong> (1/0, on/off)<br>
+                            • <code class="mqtt-topic" id="mqttTopicCircuit2Set" style="color: #27AE60; font-weight: bold; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/circuit2/set</code> - <strong>контур 2 / насос 2</strong> (1/0, on/off)<br>
                             • <code class="mqtt-topic" id="mqttTopicSensorsReset" style="color: #27AE60; font-weight: bold; cursor: pointer; text-decoration: underline;" title="Клик для копирования">{prefix}/sensors/reset</code> - <strong>сброс датчиков</strong><br>
                             <small style="display: block; margin-top: 5px; opacity: 0.8;">
                                 Выключение системы: вентилятор сразу стоп, насос работает пока подача не стабилизируется (мин. 2 мин, макс. 45 мин). Рост подачи в любом режиме снова включает насос.
@@ -2160,6 +2192,58 @@
                 });
         }
 
+        function updateCircuitStatus(circuit1Enabled, circuit2Enabled) {
+            var c1 = document.getElementById('circuit1StatusText');
+            var c2 = document.getElementById('circuit2StatusText');
+            if (c1 && circuit1Enabled !== undefined) {
+                c1.textContent = circuit1Enabled ? 'РАЗРЕШЁН' : 'ОТКЛЮЧЁН';
+                c1.style.color = circuit1Enabled ? '#00ff00' : '#ff6b6b';
+            }
+            if (c2 && circuit2Enabled !== undefined) {
+                c2.textContent = circuit2Enabled ? 'РАЗРЕШЁН' : 'ОТКЛЮЧЁН';
+                c2.style.color = circuit2Enabled ? '#00ff00' : '#ff6b6b';
+            }
+            var c1chk = document.getElementById('circuit1Enabled');
+            var c2chk = document.getElementById('circuit2Enabled');
+            if (c1chk && circuit1Enabled !== undefined) c1chk.checked = !!circuit1Enabled;
+            if (c2chk && circuit2Enabled !== undefined) c2chk.checked = !!circuit2Enabled;
+        }
+
+        function setCircuit(num, enabled) {
+            var body = {};
+            if (num === 1) {
+                body.circuit1Enabled = !!enabled;
+            } else if (num === 2) {
+                body.circuit2Enabled = !!enabled;
+            } else {
+                return;
+            }
+            updateCircuitStatus(
+                num === 1 ? enabled : undefined,
+                num === 2 ? enabled : undefined
+            );
+            fetch('/api/circuits', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                if (d.success === false) {
+                    alert('Ошибка отключения контура: ' + (d.error || 'неизвестно'));
+                }
+                if (d.circuit1Enabled !== undefined || d.circuit2Enabled !== undefined) {
+                    updateCircuitStatus(d.circuit1Enabled, d.circuit2Enabled);
+                }
+                setTimeout(updateData, 300);
+            })
+            .catch(function(e) {
+                console.error('Circuit control error:', e);
+                alert('Ошибка управления контуром: ' + e.message);
+                setTimeout(updateData, 300);
+            });
+        }
+
         function updateSystemStatus(enabled) {
             const statusText = document.getElementById('systemStatusText');
             const statusBar = document.getElementById('systemStatus');
@@ -2417,6 +2501,10 @@
                     if (pump2StatusText) {
                         pump2StatusText.textContent = d.pump2 ? 'ВКЛ' : 'ВЫКЛ';
                         pump2StatusText.style.color = d.pump2 ? '#00ff00' : '#888';
+                    }
+
+                    if (d.circuit1Enabled !== undefined || d.circuit2Enabled !== undefined) {
+                        updateCircuitStatus(d.circuit1Enabled, d.circuit2Enabled);
                     }
                     
                     // Обновление режима работы
@@ -3820,9 +3908,15 @@
                 'mqttTopicSetpoint': prefixValue + '/simple/setpoint',
                 'mqttTopicState': prefixValue + '/state',
                 'mqttTopicCoalFeeding': prefixValue + '/coalFeeding',
+                'mqttTopicPump': prefixValue + '/simple/pump',
+                'mqttTopicPump2': prefixValue + '/simple/pump2',
+                'mqttTopicCircuit1': prefixValue + '/simple/circuit1',
+                'mqttTopicCircuit2': prefixValue + '/simple/circuit2',
                 'mqttTopicSetpointSet': prefixValue + '/setpoint/set',
                 'mqttTopicSystemSet': prefixValue + '/system/set',
                 'mqttTopicSystemSetAlt': prefixValue + '/simple/enabled/set',
+                'mqttTopicCircuit1Set': prefixValue + '/circuit1/set',
+                'mqttTopicCircuit2Set': prefixValue + '/circuit2/set',
                 'mqttTopicSensorsReset': prefixValue + '/sensors/reset'
             };
             

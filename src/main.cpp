@@ -47,7 +47,7 @@
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.29"
+#define FIRMWARE_VERSION "4.2.30"
 #define DISCOVERY_UDP_PORT 4210
 #define DISCOVERY_BEACON_INTERVAL_MS 1000
 
@@ -2492,6 +2492,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (parseMqttOnOff(message, enable)) {
       circuit1Enabled = enable;
       saveRelaySettingsToEEPROM();
+      // Сразу гасим/разрешаем насос (GPIO). MQTT status — в следующем publishMqttSimple.
+      applyPumpCircuitOutputs(pumpState || pump2State || pumpCoastActive, false);
       Serial.print("[MQTT] circuit1Enabled=");
       Serial.println(enable ? "1" : "0");
     }
@@ -2501,6 +2503,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (parseMqttOnOff(message, enable)) {
       circuit2Enabled = enable;
       saveRelaySettingsToEEPROM();
+      applyPumpCircuitOutputs(pumpState || pump2State || pumpCoastActive, false);
       Serial.print("[MQTT] circuit2Enabled=");
       Serial.println(enable ? "1" : "0");
     }
@@ -3878,7 +3881,8 @@ void handleRelaySettingsPost() {
     // Сохраняем всегда, даже если значения не изменились (для надежности)
     saveRelaySettingsToEEPROM();
     Serial.println("[Реле] Настройки сохранены в EEPROM");
-    // Применяем новые настройки к текущему состоянию реле
+    // Применяем контуры к насосам, затем синхронизируем GPIO
+    applyPumpCircuitOutputs(pumpState || pump2State || pumpCoastActive, false);
     syncRelays();
     
     DynamicJsonDocument responseDoc(384);
@@ -3930,11 +3934,17 @@ void handleCircuits() {
       circuit2Enabled = doc["circuit2Enabled"].as<bool>();
     }
     saveRelaySettingsToEEPROM();
+    // Немедленно применить выход насосов (отключение контура → насос OFF)
+    applyPumpCircuitOutputs(pumpState || pump2State || pumpCoastActive, false);
     if (mqttSettings.enabled && mqttClient.connected()) {
       String t1 = mqttSettings.prefix + "/simple/circuit1";
       String t2 = mqttSettings.prefix + "/simple/circuit2";
+      String p1 = mqttSettings.prefix + "/simple/pump";
+      String p2 = mqttSettings.prefix + "/simple/pump2";
       mqttClient.publish(t1.c_str(), circuit1Enabled ? "1" : "0", true);
       mqttClient.publish(t2.c_str(), circuit2Enabled ? "1" : "0", true);
+      mqttClient.publish(p1.c_str(), pumpState ? "1" : "0", false);
+      mqttClient.publish(p2.c_str(), pump2State ? "1" : "0", false);
     }
     DynamicJsonDocument responseDoc(256);
     responseDoc["success"] = true;

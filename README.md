@@ -46,6 +46,27 @@ pio run -e esp32dev -t buildfs
 
 Если подача **растёт** (в любом режиме, в т.ч. при системе выкл) — насос включается снова (защита от саморазгорания).
 
+## MQTT: насосы / контуры
+
+Брокер по умолчанию (как в прошивке): `m5.wqtt.ru:5374`, prefix `kotel/device1`, user `u_OLTTB0` (пароль — как в настройках MQTT на ESP).
+
+Отключение насоса = запрет контура (`circuitNEnabled=false`). Насос гаснет сразу; при росте подачи защита может снова включить насосы.
+
+Команды (payload: `1`/`0`, `on`/`off`, `enable`/`disable`, `true`/`false`):
+
+- `{prefix}/circuit1/set` — контур 1 / насос 1 (дом)
+- `{prefix}/circuit2/set` — контур 2 / насос 2
+
+Статус (retain для контуров):
+
+- `{prefix}/simple/circuit1` — `1` разрешён / `0` отключён
+- `{prefix}/simple/circuit2`
+- `{prefix}/simple/pump` — фактическое состояние реле насоса 1
+- `{prefix}/simple/pump2` — насос 2
+- `{prefix}/state` — JSON (`pump`, `pump2`, `circuit1Enabled`, `circuit2Enabled`, …)
+
+Веб: кнопки «Отключить» / «Вкл» на главной → `POST /api/circuits`.
+
 ## VPS туннель (доступ с телефона)
 
 В веб-интерфейсе ESP есть раздел `VPS Туннель`:
