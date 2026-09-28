@@ -47,7 +47,7 @@
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.26"
+#define FIRMWARE_VERSION "4.2.27"
 
 // GitHub репозиторий для обновлений
 #define GITHUB_REPO_OWNER "paha22russ"
@@ -365,12 +365,12 @@ struct UpdateSettings {
 // Настройки туннеля через VPS (используются внешним агентом на ПК в локальной сети)
 struct TunnelSettings {
   bool enabled = true;
-  String vpsHost = "185.34.23.203";
+  String vpsHost = "78.17.67.121";
   int vpsPort = 7000;
   String authToken = "d64e99e3bcbe489295343b52bb296fea";
   int remotePort = 18080;
   int localTargetPort = 80;
-  String publicUrl = "http://185.34.23.203:18080";
+  String publicUrl = "http://78.17.67.121:18080";
   String tunnelName = "esp_kotel";
 } tunnelSettings;
 

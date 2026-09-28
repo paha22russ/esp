@@ -77,7 +77,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Tools\frp\sync-and-run-f
 Get-Process frpc
 ```
 
-Если процесс есть, туннель работает, и веб ESP доступен по `publicUrl` (например `http://185.34.23.203:18080`).
+Если процесс есть, туннель работает, и веб ESP доступен по `publicUrl` (например `http://78.17.67.121:18080`).
 
 ## Почему без этого нельзя
 
