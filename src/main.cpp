@@ -47,7 +47,7 @@
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.33"
+#define FIRMWARE_VERSION "4.2.34"
 #define DISCOVERY_UDP_PORT 4210
 #define DISCOVERY_BEACON_INTERVAL_MS 1000
 
@@ -2537,17 +2537,21 @@ bool mqttConnect() {
   }
   String clientId = "ESP32_Kotel_" + String(chipId, HEX);
   
-  // Настройка LWT (Last Will and Testament) - статус offline при неожиданном отключении
+  // LWT: только один will-топик в PubSubClient. Держим /status (совместимость) + зеркало /online=0 через app-publish.
+  // При hang без обрыва TCP LWT сработает только после keepalive broker'а — потребителям нужен max-age по ts/state.
   String willTopic = mqttSettings.prefix + "/status";
   String willMessage = "offline";
   bool willRetain = true;
   int willQoS = 1;
+  mqttClient.setKeepAlive(30);
   
   // Неблокирующее подключение с LWT и коротким таймаутом
   if (mqttClient.connect(clientId.c_str(), mqttSettings.user.c_str(), mqttSettings.password.c_str(),
                          willTopic.c_str(), willQoS, willRetain, willMessage.c_str())) {
     // Публикация статуса online с retain
     mqttClient.publish(willTopic.c_str(), "online", true);  // true = retain
+    String onlineTopic = mqttSettings.prefix + "/online";
+    mqttClient.publish(onlineTopic.c_str(), "1", true);
     
     // Публикация IP адреса при подключении (с retain)
     if (WiFi.status() == WL_CONNECTED) {
@@ -2631,12 +2635,26 @@ void publishMqttState() {
   doc["wifiMAC"] = WiFi.macAddress();
   doc["uptime"] = millis() / 1000;
   doc["freeMem"] = ESP.getFreeHeap();
-  
+  // Epoch для Alice/HA: отказываться от показаний если ts устарел (>2–3 мин).
+  unsigned long epochTs = 0;
+  if (ntpSettings.enabled && timeClient.isTimeSet()) {
+    epochTs = timeClient.getEpochTime();
+  }
+  doc["ts"] = epochTs;
+  doc["online"] = 1;
+
   String json;
   serializeJson(doc, json);
   
   String topic = mqttSettings.prefix + "/state";
   mqttClient.publish(topic.c_str(), json.c_str(), false);  // false = не ждать подтверждения
+
+  // Периодический refresh LWT-топика: при зависании без RST LWT не сработает сразу,
+  // но потребители смогут считать status/online устаревшими по max-age.
+  String statusTopic = mqttSettings.prefix + "/status";
+  mqttClient.publish(statusTopic.c_str(), "online", true);
+  String onlineTopic = mqttSettings.prefix + "/online";
+  mqttClient.publish(onlineTopic.c_str(), "1", true);
 }
 
 void publishMqttSimple() {
@@ -4266,6 +4284,8 @@ void handleMqttSettingsPost() {
       if (mqttClient.connected()) {
         String statusTopic = mqttSettings.prefix + "/status";
         mqttClient.publish(statusTopic.c_str(), "offline", true);  // true = retain
+        String onlineTopic = mqttSettings.prefix + "/online";
+        mqttClient.publish(onlineTopic.c_str(), "0", true);
         // Неблокирующая задержка для публикации MQTT
         unsigned long startTime = millis();
         for (int i = 0; i < 10; i++) {
@@ -4281,6 +4301,8 @@ void handleMqttSettingsPost() {
       if (mqttClient.connected()) {
         String statusTopic = mqttSettings.prefix + "/status";
         mqttClient.publish(statusTopic.c_str(), "offline", true);  // true = retain
+        String onlineTopic = mqttSettings.prefix + "/online";
+        mqttClient.publish(onlineTopic.c_str(), "0", true);
         // Неблокирующая задержка для публикации MQTT
         unsigned long startTime = millis();
         for (int i = 0; i < 10; i++) {
