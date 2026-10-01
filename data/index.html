@@ -1012,6 +1012,26 @@
                 </div>
             </div>
 
+            <!-- Загрузка ЦП / память / версия — крупно на главной -->
+            <div id="espSysStrip" style="background: #1f2a22; border: 1px solid #3a5a40; border-radius: 12px; padding: 10px 12px; margin: 6px 0; display: flex; flex-wrap: wrap; justify-content: space-around; gap: 8px 14px; font-size: 0.95em;">
+                <div style="text-align: center; min-width: 90px;">
+                    <div style="color: #8fbc8f; font-size: 0.85em; margin-bottom: 2px;">ЦП</div>
+                    <div id="cpuLoadMain" style="font-weight: 700; font-size: 1.25em; color: #2ECC71;">--%</div>
+                </div>
+                <div style="text-align: center; min-width: 90px;">
+                    <div style="color: #8fbc8f; font-size: 0.85em; margin-bottom: 2px;">Loop max</div>
+                    <div id="loopMsMain" style="font-weight: 700; font-size: 1.15em; color: #ecf0f1;">-- мс</div>
+                </div>
+                <div style="text-align: center; min-width: 90px;">
+                    <div style="color: #8fbc8f; font-size: 0.85em; margin-bottom: 2px;">RAM</div>
+                    <div id="heapMain" style="font-weight: 700; font-size: 1.15em; color: #ecf0f1;">-- КБ</div>
+                </div>
+                <div style="text-align: center; min-width: 90px;">
+                    <div style="color: #8fbc8f; font-size: 0.85em; margin-bottom: 2px;">Версия</div>
+                    <div id="fwVersionMain" style="font-weight: 700; font-size: 1.15em; color: #ecf0f1;">--</div>
+                </div>
+            </div>
+
             <!-- Отключение насосов (контуры) -->
             <div style="background: #2a2a2a; border-radius: 12px; padding: 12px; margin: 8px 0;">
                 <div style="font-size: 0.85em; color: #aaa; margin-bottom: 10px; text-align: center;">Насосы — отключение контуров</div>
@@ -2656,24 +2676,54 @@
                         }
                     }
 
-                    // Загрузка ЦП ESP + свободная память
-                    var cpuEl = document.getElementById('cpuLoadStatus');
-                    if (cpuEl && d.cpuLoad !== undefined && d.cpuLoad !== null) {
-                        var cpuVal = Number(d.cpuLoad);
-                        var cpuText = cpuVal.toFixed(0) + '%';
+                    // Загрузка ЦП ESP + свободная память (шапка + главная полоса)
+                    var cpuVal = null;
+                    if (d.cpuLoad !== undefined && d.cpuLoad !== null) {
+                        cpuVal = Number(d.cpuLoad);
+                    }
+                    var cpuText = '--';
+                    var cpuColor = '#2ECC71';
+                    if (cpuVal !== null && !isNaN(cpuVal)) {
+                        cpuText = cpuVal.toFixed(0) + '%';
                         if (d.maxLoopMs !== undefined && d.maxLoopMs !== null) {
                             cpuText += ' / ' + d.maxLoopMs + 'мс';
                         }
+                        if (cpuVal >= 80) cpuColor = '#E74C3C';
+                        else if (cpuVal >= 50) cpuColor = '#F39C12';
+                        else cpuColor = '#2ECC71';
+                    }
+                    var cpuEl = document.getElementById('cpuLoadStatus');
+                    if (cpuEl && cpuVal !== null && !isNaN(cpuVal)) {
                         cpuEl.textContent = cpuText;
-                        if (cpuVal >= 80) cpuEl.style.color = '#E74C3C';
-                        else if (cpuVal >= 50) cpuEl.style.color = '#F39C12';
-                        else cpuEl.style.color = '#2ECC71';
+                        cpuEl.style.color = cpuColor;
+                    }
+                    var cpuMain = document.getElementById('cpuLoadMain');
+                    if (cpuMain && cpuVal !== null && !isNaN(cpuVal)) {
+                        cpuMain.textContent = cpuVal.toFixed(0) + '%';
+                        cpuMain.style.color = cpuColor;
+                    }
+                    var loopMain = document.getElementById('loopMsMain');
+                    if (loopMain && d.maxLoopMs !== undefined && d.maxLoopMs !== null) {
+                        loopMain.textContent = d.maxLoopMs + ' мс';
                     }
                     var heapEl = document.getElementById('heapStatus');
-                    if (heapEl && d.freeHeap !== undefined && d.freeHeap !== null) {
-                        heapEl.textContent = Math.round(Number(d.freeHeap) / 1024) + ' КБ';
+                    var heapKb = null;
+                    if (d.freeHeap !== undefined && d.freeHeap !== null) {
+                        heapKb = Math.round(Number(d.freeHeap) / 1024);
+                    }
+                    if (heapEl && heapKb !== null) {
+                        heapEl.textContent = heapKb + ' КБ';
                         if (Number(d.freeHeap) < 50000) heapEl.style.color = '#E74C3C';
                         else heapEl.style.color = '#aaa';
+                    }
+                    var heapMain = document.getElementById('heapMain');
+                    if (heapMain && heapKb !== null) {
+                        heapMain.textContent = heapKb + ' КБ';
+                        heapMain.style.color = (Number(d.freeHeap) < 50000) ? '#E74C3C' : '#ecf0f1';
+                    }
+                    var fwMain = document.getElementById('fwVersionMain');
+                    if (fwMain && d.firmwareVersion) {
+                        fwMain.textContent = d.firmwareVersion;
                     }
                     
                     // Отображение уровня сигнала WiFi с визуальными индикаторами
