@@ -899,6 +899,14 @@
                     <span style="color: #aaa;">MQTT:</span>
                     <strong id="mqttStatus">--</strong>
                 </div>
+                <div class="status-indicator">
+                    <span style="color: #aaa;">ЦП:</span>
+                    <strong id="cpuLoadStatus">--</strong>
+                </div>
+                <div class="status-indicator">
+                    <span style="color: #aaa;">RAM:</span>
+                    <strong id="heapStatus">--</strong>
+                </div>
             </div>
         </div>
 
@@ -1940,20 +1948,31 @@
         <div id="settingsLog" class="settings-page">
             <button class="back-button" onclick="showMain()">← Назад</button>
             <div class="settings-group">
-                <h3>📋 Журнал перезагрузок</h3>
+                <h3>Журнал событий</h3>
+                <div class="btn-group" style="margin-top: 10px;">
+                    <button class="btn btn-primary" onclick="loadEventJournal()">Обновить</button>
+                    <a class="btn btn-secondary" href="/events.txt" download="kotel-events.txt">Скачать</a>
+                    <button class="btn btn-secondary" onclick="clearEventJournal()">Очистить</button>
+                </div>
+                <div id="eventLogContainer" style="background: #2a2a2a; border-radius: 8px; padding: 15px; max-height: 40vh; overflow-y: auto; margin-top: 10px;">
+                    <div style="text-align: center; color: #888; padding: 20px;">Загрузка...</div>
+                </div>
+            </div>
+            <div class="settings-group">
+                <h3>Журнал перезагрузок</h3>
                 <div class="setting-item">
                     <label>Текущее количество перезагрузок</label>
                     <input type="text" id="currentBootCount" readonly style="background: #e9ecef; color: var(--text-color) !important; font-weight: bold;">
                 </div>
                 <div class="btn-group" style="margin-top: 10px;">
-                    <button class="btn btn-primary" onclick="loadBootLog()">🔄 Обновить</button>
-                    <button class="btn btn-secondary" onclick="resetBootCount()">🗑️ Очистить журнал</button>
+                    <button class="btn btn-primary" onclick="loadBootLog()">Обновить</button>
+                    <button class="btn btn-secondary" onclick="resetBootCount()">Очистить журнал</button>
                 </div>
             </div>
 
             <div class="settings-group">
                 <h3>История перезагрузок</h3>
-                <div id="bootLogContainer" style="background: #2a2a2a; border-radius: 8px; padding: 15px; max-height: 60vh; overflow-y: auto;">
+                <div id="bootLogContainer" style="background: #2a2a2a; border-radius: 8px; padding: 15px; max-height: 40vh; overflow-y: auto;">
                     <div style="text-align: center; color: #888; padding: 20px;">
                         Загрузка журнала...
                     </div>
@@ -2076,6 +2095,7 @@
             } else if (type === 'system') {
                 loadSystemInfo();
             } else if (type === 'log') {
+                loadEventJournal();
                 loadBootLog();
             }
         }
@@ -2167,9 +2187,12 @@
                 .catch(e => console.error('Error:', e));
         }
 
+        let systemTogglePending = false;
+
         function toggleSystem() {
             const checkbox = document.getElementById('systemEnabled');
             const enabled = checkbox.checked;
+            systemTogglePending = true;
             
             fetch('/api/system/enable?enabled=' + (enabled ? 1 : 0), { method: 'POST' })
                 .then(r => r.json())
@@ -2189,7 +2212,8 @@
                 .catch(e => {
                     console.error('Error:', e);
                     checkbox.checked = !enabled;
-                });
+                })
+                .then(function() { systemTogglePending = false; });
         }
 
         function updateCircuitStatus(circuit1Enabled, circuit2Enabled) {
@@ -2437,10 +2461,14 @@
                     let statusText = 'Работа';
                     let statusClass = 'success';
                     const isExtinguished = d.boilerExtinguished === true ||
-                        d.state === 'КОТЕЛ_ПОГАС' || d.state === 'ОШИБКА_РОЗЖИГА';
+                        d.state === 'КОТЕЛ_ПОГАС' || d.state === 'ОШИБКА_РОЗЖИГА' ||
+                        d.state === 'COAL_BURNED' || d.state === 'HEATING_TIMEOUT';
                     
                     if (isExtinguished) {
-                        statusText = (d.state === 'ОШИБКА_РОЗЖИГА') ? 'Ошибка розжига' : 'Котел погас';
+                        if (d.state === 'ОШИБКА_РОЗЖИГА') statusText = 'Ошибка розжига';
+                        else if (d.state === 'COAL_BURNED') statusText = 'Уголь прогорел';
+                        else if (d.state === 'HEATING_TIMEOUT') statusText = 'Таймаут разогрева';
+                        else statusText = 'Котел погас';
                         statusClass = 'warning';
                         document.body.classList.add('extinguishing');
                     } else {
@@ -2472,7 +2500,7 @@
                     
                     // Обновление статуса системы
                     try {
-                        if (d.systemEnabled !== undefined) {
+                        if (d.systemEnabled !== undefined && !systemTogglePending) {
                             const systemEnabledCheckbox = document.getElementById('systemEnabled');
                             if (systemEnabledCheckbox) {
                                 systemEnabledCheckbox.checked = d.systemEnabled;
@@ -2626,6 +2654,26 @@
                         } else {
                             mqttStatusEl.style.color = '#888';
                         }
+                    }
+
+                    // Загрузка ЦП ESP + свободная память
+                    var cpuEl = document.getElementById('cpuLoadStatus');
+                    if (cpuEl && d.cpuLoad !== undefined && d.cpuLoad !== null) {
+                        var cpuVal = Number(d.cpuLoad);
+                        var cpuText = cpuVal.toFixed(0) + '%';
+                        if (d.maxLoopMs !== undefined && d.maxLoopMs !== null) {
+                            cpuText += ' / ' + d.maxLoopMs + 'мс';
+                        }
+                        cpuEl.textContent = cpuText;
+                        if (cpuVal >= 80) cpuEl.style.color = '#E74C3C';
+                        else if (cpuVal >= 50) cpuEl.style.color = '#F39C12';
+                        else cpuEl.style.color = '#2ECC71';
+                    }
+                    var heapEl = document.getElementById('heapStatus');
+                    if (heapEl && d.freeHeap !== undefined && d.freeHeap !== null) {
+                        heapEl.textContent = Math.round(Number(d.freeHeap) / 1024) + ' КБ';
+                        if (Number(d.freeHeap) < 50000) heapEl.style.color = '#E74C3C';
+                        else heapEl.style.color = '#aaa';
                     }
                     
                     // Отображение уровня сигнала WiFi с визуальными индикаторами
@@ -3452,6 +3500,57 @@
                     document.getElementById('systemFreeMem').value = '--';
                     document.getElementById('systemTime').value = '--:--:--';
                     document.getElementById('systemDate').value = '--.--.----';
+                });
+        }
+
+        function loadEventJournal() {
+            fetch('/api/events')
+                .then(r => r.json())
+                .then(d => {
+                    const container = document.getElementById('eventLogContainer');
+                    if (!container) return;
+                    if (!d.entries || d.entries.length === 0) {
+                        container.innerHTML = '<div style="text-align: center; color: #888; padding: 20px;">Журнал пуст</div>';
+                        return;
+                    }
+                    let html = '<table style="width: 100%; border-collapse: collapse; font-size: 0.85em;">';
+                    html += '<thead><tr style="border-bottom: 2px solid #3a3a3a;">';
+                    html += '<th style="text-align: left; padding: 6px; color: #aaa;">Время</th>';
+                    html += '<th style="text-align: left; padding: 6px; color: #aaa;">Событие</th>';
+                    html += '<th style="text-align: left; padding: 6px; color: #aaa;">Детали</th>';
+                    html += '</tr></thead><tbody>';
+                    const sorted = d.entries.slice().reverse();
+                    sorted.forEach(function(entry) {
+                        html += '<tr style="border-bottom: 1px solid #3a3a3a;">';
+                        html += '<td style="padding: 6px; color: #aaa;">' + (entry.datetime || 'N/A') + '</td>';
+                        html += '<td style="padding: 6px; color: #4A90E2;">' + (entry.type || '') + '</td>';
+                        html += '<td style="padding: 6px; color: #fff;">' + (entry.details || '') + '</td>';
+                        html += '</tr>';
+                    });
+                    html += '</tbody></table>';
+                    container.innerHTML = html;
+                })
+                .catch(e => {
+                    console.error('Error loading events:', e);
+                    const container = document.getElementById('eventLogContainer');
+                    if (container) container.innerHTML = '<div style="text-align: center; color: #ff4444; padding: 20px;">Ошибка загрузки</div>';
+                });
+        }
+
+        function clearEventJournal() {
+            if (!confirm('Очистить журнал событий?')) return;
+            fetch('/api/events/clear', { method: 'POST' })
+                .then(r => r.json())
+                .then(d => {
+                    if (d.success) {
+                        loadEventJournal();
+                    } else {
+                        alert('Ошибка очистки');
+                    }
+                })
+                .catch(e => {
+                    console.error(e);
+                    alert('Ошибка очистки');
                 });
         }
 

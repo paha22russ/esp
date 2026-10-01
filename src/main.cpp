@@ -47,7 +47,7 @@
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.34"
+#define FIRMWARE_VERSION "4.2.36"
 #define DISCOVERY_UDP_PORT 4210
 #define DISCOVERY_BEACON_INTERVAL_MS 1000
 
@@ -247,10 +247,12 @@ struct EventLogEntry {
   bool valid;           // Флаг валидности записи
 };
 
-const int EVENT_LOG_MAX_ENTRIES = 30;  // Максимум 30 записей событий
+const int EVENT_LOG_MAX_ENTRIES = 80;  // Кольцевой буфер ~80 событий
 EventLogEntry eventLog[EVENT_LOG_MAX_ENTRIES];
 uint8_t eventLogWriteIndex = 0;  // Индекс для записи следующей записи
-const int EVENT_LOG_ENTRY_SIZE = 80;  // Размер одной записи (timestamp + eventType + details + valid)
+const char* EVENT_LOG_PATH = "/events.log";
+bool eventLogDirty = false;
+unsigned long lastEventLogFlush = 0;
 
 // Статистика работы
 struct FanStatistics {
@@ -285,9 +287,11 @@ uint8_t bootLogWriteIndex = 0;  // Индекс для записи следую
 
 // Переменные для вычисления загрузки CPU
 unsigned long loopStartTime = 0;
-unsigned long totalLoopTime = 0;  // Суммарное время выполнения loop() за период обновления
+unsigned long totalLoopTime = 0;  // Суммарное время выполнения loop() за период (мкс)
 unsigned long loopCount = 0;  // Количество выполнений loop() за период обновления
-float cpuLoad = 0.0;  // Загрузка CPU в процентах
+float cpuLoad = 0.0;  // Загрузка CPU в процентах (доля времени в loop vs период)
+unsigned long maxLoopMs = 0;       // Текущий max за окно накопления
+unsigned long maxLoopMsPub = 0;    // Последнее опубликованное значение для API
 unsigned long lastCpuUpdate = 0;
 const unsigned long CPU_UPDATE_INTERVAL = 1000;  // Обновление загрузки CPU раз в секунду
 
@@ -460,13 +464,18 @@ void loadComfortSettingsFromEEPROM();
 void saveWorkModeToEEPROM();
 void loadWorkModeFromEEPROM();
 void logEvent(const char* eventType, const char* details);
-void saveEventLogToEEPROM();
-void loadEventLogFromEEPROM();
+void saveEventLogToSpiffs();
+void loadEventLogFromSpiffs();
+void handleEventsGet();
+void handleEventsTxt();
+void handleEventsClear();
 void saveFanStatsToEEPROM();
 void loadFanStatsFromEEPROM();
 void startIgnition();
 void checkBoilerExtinguished(unsigned long now);
 void checkIgnitionProgress(unsigned long now);
+bool isFaultStopState();
+bool clearSoftStopFaults(const char* source);
 void applySystemEnable(bool enable, const char* source);
 void startPumpCoast(const char* reason);
 void updatePumpLogic(unsigned long now);
@@ -1822,48 +1831,182 @@ void handleBootCountReset() {
   Serial.println("[Boot] Boot count and log reset to 0");
 }
 
-// Функция логирования событий
+// API: Журнал событий (JSON)
+void handleEventsGet() {
+  if (eventLogDirty) {
+    saveEventLogToSpiffs();
+    eventLogDirty = false;
+    lastEventLogFlush = millis();
+  }
+  DynamicJsonDocument doc(8192);
+  JsonArray entries = doc.createNestedArray("entries");
+  for (int i = 0; i < EVENT_LOG_MAX_ENTRIES; i++) {
+    int idx = (eventLogWriteIndex + i) % EVENT_LOG_MAX_ENTRIES;
+    if (!eventLog[idx].valid || eventLog[idx].eventType[0] == '\0') {
+      continue;
+    }
+    JsonObject entry = entries.createNestedObject();
+    entry["timestamp"] = eventLog[idx].timestamp;
+    entry["type"] = eventLog[idx].eventType;
+    entry["details"] = eventLog[idx].details;
+    if (eventLog[idx].timestamp > 0) {
+      time_t t = eventLog[idx].timestamp;
+      struct tm *timeInfo = localtime(&t);
+      char timeStr[20];
+      strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", timeInfo);
+      entry["datetime"] = timeStr;
+    } else {
+      entry["datetime"] = "N/A";
+    }
+  }
+  doc["total"] = entries.size();
+  doc["max"] = EVENT_LOG_MAX_ENTRIES;
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+// API: Журнал событий (текст для скачивания)
+void handleEventsTxt() {
+  if (eventLogDirty) {
+    saveEventLogToSpiffs();
+    eventLogDirty = false;
+    lastEventLogFlush = millis();
+  }
+  String body;
+  body.reserve(4096);
+  body += "# Kotel event journal\n";
+  body += "# timestamp\ttype\tdetails\n";
+  for (int i = 0; i < EVENT_LOG_MAX_ENTRIES; i++) {
+    int idx = (eventLogWriteIndex + i) % EVENT_LOG_MAX_ENTRIES;
+    if (!eventLog[idx].valid || eventLog[idx].eventType[0] == '\0') {
+      continue;
+    }
+    body += String(eventLog[idx].timestamp);
+    body += '\t';
+    body += eventLog[idx].eventType;
+    body += '\t';
+    body += eventLog[idx].details;
+    body += '\n';
+  }
+  server.sendHeader("Content-Disposition", "attachment; filename=\"kotel-events.txt\"");
+  server.send(200, "text/plain; charset=utf-8", body);
+}
+
+// API: Очистка журнала событий
+void handleEventsClear() {
+  for (int i = 0; i < EVENT_LOG_MAX_ENTRIES; i++) {
+    eventLog[i].valid = false;
+    eventLog[i].timestamp = 0;
+    eventLog[i].eventType[0] = '\0';
+    eventLog[i].details[0] = '\0';
+  }
+  eventLogWriteIndex = 0;
+  eventLogDirty = false;
+  if (SPIFFS.exists(EVENT_LOG_PATH)) {
+    SPIFFS.remove(EVENT_LOG_PATH);
+  }
+  DynamicJsonDocument doc(128);
+  doc["success"] = true;
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+  Serial.println("[Event] Journal cleared");
+}
+
+// Функция логирования событий (RAM + SPIFFS, переживает сброс питания)
 void logEvent(const char* eventType, const char* details) {
   EventLogEntry entry;
   entry.timestamp = (ntpSettings.enabled && timeClient.isTimeSet()) ? timeClient.getEpochTime() : 0;
   strncpy(entry.eventType, eventType, sizeof(entry.eventType) - 1);
   entry.eventType[sizeof(entry.eventType) - 1] = '\0';
-  strncpy(entry.details, details, sizeof(entry.details) - 1);
+  strncpy(entry.details, details ? details : "", sizeof(entry.details) - 1);
   entry.details[sizeof(entry.details) - 1] = '\0';
   entry.valid = true;
   
-  // Записываем в циклический буфер
   eventLog[eventLogWriteIndex] = entry;
   eventLogWriteIndex = (eventLogWriteIndex + 1) % EVENT_LOG_MAX_ENTRIES;
+  eventLogDirty = true;
   
-  // Сохраняем в EEPROM
-  saveEventLogToEEPROM();
+  // FAN_ON/OFF часто — отложенная запись; критичные события — сразу
+  bool defer = (strcmp(eventType, "FAN_ON") == 0 || strcmp(eventType, "FAN_OFF") == 0);
+  if (!defer) {
+    saveEventLogToSpiffs();
+    eventLogDirty = false;
+    lastEventLogFlush = millis();
+  }
   
   Serial.print("[Event] ");
   Serial.print(eventType);
   Serial.print(": ");
-  Serial.println(details);
+  Serial.println(details ? details : "");
 }
 
-// Сохранение журнала событий в EEPROM
-void saveEventLogToEEPROM() {
-  for (int i = 0; i < EVENT_LOG_MAX_ENTRIES; i++) {
-    EEPROM.put(EEPROM_ADDR_EVENT_LOG + i * EVENT_LOG_ENTRY_SIZE, eventLog[i]);
+// Сохранение журнала событий в SPIFFS (переживает power-cycle)
+void saveEventLogToSpiffs() {
+  if (!SPIFFS.begin(false)) {
+    return;
   }
-  EEPROM.commit();
-}
-
-// Загрузка журнала событий из EEPROM
-void loadEventLogFromEEPROM() {
-  EEPROM.get(EEPROM_ADDR_EVENT_LOG, eventLog);
-  // Проверяем валидность записей
+  File f = SPIFFS.open(EVENT_LOG_PATH, FILE_WRITE);
+  if (!f) {
+    return;
+  }
   for (int i = 0; i < EVENT_LOG_MAX_ENTRIES; i++) {
-    if (!eventLog[i].valid) {
-      eventLog[i].timestamp = 0;
-      eventLog[i].eventType[0] = '\0';
-      eventLog[i].details[0] = '\0';
+    int idx = (eventLogWriteIndex + i) % EVENT_LOG_MAX_ENTRIES;
+    if (!eventLog[idx].valid || eventLog[idx].eventType[0] == '\0') {
+      continue;
     }
+    f.printf("%lu\t%s\t%s\n",
+             (unsigned long)eventLog[idx].timestamp,
+             eventLog[idx].eventType,
+             eventLog[idx].details);
   }
+  f.close();
+}
+
+// Загрузка журнала событий из SPIFFS
+void loadEventLogFromSpiffs() {
+  for (int i = 0; i < EVENT_LOG_MAX_ENTRIES; i++) {
+    eventLog[i].valid = false;
+    eventLog[i].timestamp = 0;
+    eventLog[i].eventType[0] = '\0';
+    eventLog[i].details[0] = '\0';
+  }
+  eventLogWriteIndex = 0;
+  
+  if (!SPIFFS.exists(EVENT_LOG_PATH)) {
+    return;
+  }
+  File f = SPIFFS.open(EVENT_LOG_PATH, FILE_READ);
+  if (!f) {
+    return;
+  }
+  
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() < 3) {
+      continue;
+    }
+    int t1 = line.indexOf('\t');
+    int t2 = (t1 >= 0) ? line.indexOf('\t', t1 + 1) : -1;
+    if (t1 < 0 || t2 < 0) {
+      continue;
+    }
+    EventLogEntry entry;
+    entry.timestamp = (uint32_t)line.substring(0, t1).toInt();
+    String et = line.substring(t1 + 1, t2);
+    String det = line.substring(t2 + 1);
+    strncpy(entry.eventType, et.c_str(), sizeof(entry.eventType) - 1);
+    entry.eventType[sizeof(entry.eventType) - 1] = '\0';
+    strncpy(entry.details, det.c_str(), sizeof(entry.details) - 1);
+    entry.details[sizeof(entry.details) - 1] = '\0';
+    entry.valid = true;
+    eventLog[eventLogWriteIndex] = entry;
+    eventLogWriteIndex = (eventLogWriteIndex + 1) % EVENT_LOG_MAX_ENTRIES;
+  }
+  f.close();
+  Serial.println("[Event] Journal loaded from SPIFFS");
 }
 
 // Сохранение статистики вентилятора в EEPROM
@@ -2176,17 +2319,67 @@ void startPumpCoast(const char* reason) {
   Serial.println(reason ? reason : "start");
 }
 
+// Sticky soft-stop / extinguish states that block normal operation
+bool isFaultStopState() {
+  return boilerExtinguished ||
+         systemState == "КОТЕЛ_ПОГАС" ||
+         systemState == "ОШИБКА_РОЗЖИГА" ||
+         systemState == "COAL_BURNED" ||
+         systemState == "HEATING_TIMEOUT";
+}
+
+// Clear COAL_BURNED / HEATING_TIMEOUT latch without ignition protocol
+bool clearSoftStopFaults(const char* source) {
+  if (systemState != "COAL_BURNED" && systemState != "HEATING_TIMEOUT") {
+    return false;
+  }
+  const char* prev = (systemState == "COAL_BURNED") ? "COAL_BURNED" : "HEATING_TIMEOUT";
+  boilerExtinguished = false;
+  ignitionInProgress = false;
+  ignitionStartTime = 0;
+  coalBurnedCheckStart = 0;
+  heatingStartTime = 0;
+  coalFeedingActive = false;
+  systemState = "IDLE";
+  Serial.print("[Система] Сброс soft-stop ");
+  Serial.print(prev);
+  Serial.print(" (");
+  Serial.print(source ? source : "?");
+  Serial.println(")");
+  return true;
+}
+
 // Включение/выключение системы (веб, MQTT, погасание)
 void applySystemEnable(bool enable, const char* source) {
   const char* src = source ? source : "unknown";
   
   if (enable) {
-    if (boilerExtinguished || systemState == "КОТЕЛ_ПОГАС" || systemState == "ОШИБКА_РОЗЖИГА" ||
-        systemState == "COAL_BURNED") {
+    // Soft-stop (уголь прогорел / таймаут): сброс latch + обычная работа, без принудительного розжига
+    if (systemState == "COAL_BURNED" || systemState == "HEATING_TIMEOUT") {
+      clearSoftStopFaults(src);
+      systemEnabled = true;
+      pumpCoastActive = false;
+      pumpCoastStartTime = 0;
+      pumpStableSince = 0;
+      saveSystemEnabledToEEPROM();
+      queueSystemEnabledMqtt();
+      char details[48];
+      snprintf(details, sizeof(details), "on via %s (soft-stop clear)", src);
+      logEvent("SYSTEM_ENABLE", details);
+      Serial.print("[Система] Включена после soft-stop (");
+      Serial.print(src);
+      Serial.println(") → обычная логика вентилятора");
+      return;
+    }
+
+    if (boilerExtinguished || systemState == "КОТЕЛ_ПОГАС" || systemState == "ОШИБКА_РОЗЖИГА") {
       Serial.print("[Система] Вкл (");
       Serial.print(src);
       Serial.println(") при погасании → розжиг");
       startIgnition();
+      char details[48];
+      snprintf(details, sizeof(details), "on via %s (ignition)", src);
+      logEvent("SYSTEM_ENABLE", details);
       queueSystemEnabledMqtt();
       return;
     }
@@ -2195,11 +2388,11 @@ void applySystemEnable(bool enable, const char* source) {
     pumpCoastActive = false;
     pumpCoastStartTime = 0;
     pumpStableSince = 0;
-    if (systemState == "HEATING_TIMEOUT") {
-      systemState = "IDLE";
-    }
     saveSystemEnabledToEEPROM();
     queueSystemEnabledMqtt();
+    char details[40];
+    snprintf(details, sizeof(details), "on via %s", src);
+    logEvent("SYSTEM_ENABLE", details);
     Serial.print("[Система] Включена (");
     Serial.print(src);
     Serial.println(")");
@@ -2242,6 +2435,12 @@ void applySystemEnable(bool enable, const char* source) {
   }
   
   queueSystemEnabledMqtt();
+  if (strcmp(src, "coal_burned") != 0 && strcmp(src, "heating_timeout") != 0 &&
+      strcmp(src, "extinguished") != 0 && strcmp(src, "ignition_failed") != 0) {
+    char details[40];
+    snprintf(details, sizeof(details), "off via %s", src);
+    logEvent("SYSTEM_DISABLE", details);
+  }
   Serial.print("[Система] Выключена (");
   Serial.print(src);
   Serial.print("), выбег насоса: ");
@@ -2903,9 +3102,19 @@ void handleEncoderButton() {
       // Кнопка удерживается - проверяем длительное нажатие
       unsigned long pressDuration = currentTime - buttonPressStartTime;
       if (pressDuration >= BUTTON_LONG_PRESS_MS && !longPressHandled) {
-        // Длительное нажатие (3 секунды) - запуск розжига
+        // Длительное нажатие (3 секунды) - явный запуск розжига
         longPressHandled = true;
+        if (systemState == "COAL_BURNED" || systemState == "HEATING_TIMEOUT") {
+          clearSoftStopFaults("encoder_long");
+          boilerExtinguished = true;  // чтобы startIgnition() сработал после сброса soft-stop
+        }
         startIgnition();
+        if (!systemEnabled && ignitionInProgress) {
+          systemEnabled = true;
+          saveSystemEnabledToEEPROM();
+          queueSystemEnabledMqtt();
+        }
+        logEvent("ENCODER", "long ignition");
         Serial.println("[ENCODER] Long press detected - starting ignition");
       }
     }
@@ -2928,15 +3137,18 @@ void handleEncoderButton() {
         buttonHandled = true;
         lastButtonPress = currentTime;
         
-        // Если котел погас - запускаем розжиг
-        if (boilerExtinguished || systemState == "КОТЕЛ_ПОГАС") {
-          startIgnition();
+        // Soft-stop / погасание: короткое нажатие = включить систему (сброс latch)
+        if (isFaultStopState()) {
+          applySystemEnable(true, "encoder");
+          logEvent("ENCODER", "short recover");
         }
         // Иначе переключение подброса угля
         else if (!coalFeedingActive) {
           startCoalFeeding();
+          logEvent("ENCODER", "coal feed start");
         } else {
           stopCoalFeeding();
+          logEvent("ENCODER", "coal feed stop");
         }
       }
       
@@ -3087,8 +3299,10 @@ void setFanDesired(bool on) {
   fanState = on;
   if (on) {
     beginFanCycle(millis());
+    logEvent("FAN_ON", "");
   } else {
     endFanCycle();
+    logEvent("FAN_OFF", "");
   }
   writeActuatorGpios();
 }
@@ -3681,7 +3895,8 @@ void handleStatus() {
   // Диагностическая информация
   doc["freeHeap"] = ESP.getFreeHeap();
   doc["minFreeHeap"] = ESP.getMinFreeHeap();
-  doc["cpuLoad"] = cpuLoad;
+  doc["cpuLoad"] = round(cpuLoad * 10) / 10.0;
+  doc["maxLoopMs"] = maxLoopMsPub;
   doc["uptime"] = millis() / 1000;  // Время работы в секундах
   
   // Информация о тренде температуры (1 = рост, 0 = стабильно, -1 = падение)
@@ -3735,7 +3950,8 @@ void handleDiagnostics() {
   doc["uptimeFormatted"] = String(uptimeStr);
   
   // Загрузка CPU
-  doc["cpuLoad"] = cpuLoad;
+  doc["cpuLoad"] = round(cpuLoad * 10) / 10.0;
+  doc["maxLoopMs"] = maxLoopMsPub;
   
   // Информация о WiFi
   doc["wifiStatus"] = WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected";
@@ -4337,11 +4553,23 @@ void handleMqttTest() {
 
 // API: Запуск розжига
 void handleIgnition() {
-  if (boilerExtinguished || systemState == "КОТЕЛ_ПОГАС" || systemState == "ОШИБКА_РОЗЖИГА") {
+  if (systemState == "COAL_BURNED" || systemState == "HEATING_TIMEOUT") {
+    clearSoftStopFaults("web_ignition");
+    boilerExtinguished = true;
+  }
+  if (boilerExtinguished || systemState == "КОТЕЛ_ПОГАС" || systemState == "ОШИБКА_РОЗЖИГА" ||
+      systemState == "COAL_BURNED" || systemState == "HEATING_TIMEOUT") {
     startIgnition();
+    if (!systemEnabled) {
+      systemEnabled = true;
+      saveSystemEnabledToEEPROM();
+      queueSystemEnabledMqtt();
+    }
     DynamicJsonDocument doc(200);
     doc["success"] = true;
     doc["message"] = "Розжиг запущен";
+    doc["systemEnabled"] = systemEnabled;
+    doc["state"] = systemState;
     String response;
     serializeJson(doc, response);
     server.send(200, "application/json", response);
@@ -4389,17 +4617,25 @@ void resetAllTimers() {
 // Функция определения состояния системы при запуске
 void determineSystemStateOnStartup() {
   Serial.println("[STARTUP] Определение состояния системы...");
-  
-  // Если система выключена, сбрасываем все таймеры
-  if (!systemEnabled) {
-    resetAllTimers();
-    setFanDesired(false);
-    setPumpDesired(false);
-    setPump2Desired(false);
+
+  // После сброса питания всегда рабочий режим (не оставляем sticky OFF после COAL_BURNED)
+  systemEnabled = true;
+  boilerExtinguished = false;
+  ignitionInProgress = false;
+  ignitionStartTime = 0;
+  coalFeedingActive = false;
+  coalBurnedCheckStart = 0;
+  heatingStartTime = 0;
+  pumpCoastActive = false;
+  pumpCoastStartTime = 0;
+  pumpStableSince = 0;
+  if (systemState == "КОТЕЛ_ПОГАС" || systemState == "ОШИБКА_РОЗЖИГА" ||
+      systemState == "COAL_BURNED" || systemState == "HEATING_TIMEOUT" ||
+      systemState == "" || systemState == "РОЗЖИГ") {
     systemState = "IDLE";
-    Serial.println("[STARTUP] Система выключена - все таймеры сброшены");
-    return;
   }
+  saveSystemEnabledToEEPROM();
+  setFanDesired(false);
   
   // Инициализируем время обнаружения датчиков, если оно не было установлено
   if (lastSensorsDetectedTime == 0) {
@@ -4434,27 +4670,6 @@ void determineSystemStateOnStartup() {
   if (pumpState && lastPumpRunTime == 0) {
     lastPumpRunTime = now;
     Serial.println("[STARTUP] Насос включен - устанавливаем таймер");
-  }
-  
-  // Если розжиг был в процессе, но система перезагрузилась - сбрасываем
-  if (ignitionInProgress) {
-    ignitionInProgress = false;
-    ignitionStartTime = 0;
-    Serial.println("[STARTUP] Розжиг был в процессе - сбрасываем (перезагрузка)");
-  }
-  
-  // Если подброс угля был активен, но система перезагрузилась - сбрасываем
-  if (coalFeedingActive) {
-    coalFeedingActive = false;
-    coalFeedingStartTime = 0;
-    Serial.println("[STARTUP] Подброс угля был активен - сбрасываем (перезагрузка)");
-  }
-  
-  // Если система была в состоянии "КОТЕЛ ПОГАС" или "ОШИБКА_РОЗЖИГА" - сбрасываем
-  if (systemState == "КОТЕЛ_ПОГАС" || systemState == "ОШИБКА_РОЗЖИГА") {
-    boilerExtinguished = false;
-    systemState = "IDLE";
-    Serial.println("[STARTUP] Сбрасываем состояние погасания/ошибки розжига");
   }
   
   // Устанавливаем начальное состояние, если оно не определено
@@ -4506,9 +4721,12 @@ void handleSystemReset() {
   boilerExtinguished = false;
   ignitionInProgress = false;
   ignitionStartTime = 0;
+  coalBurnedCheckStart = 0;
+  heatingStartTime = 0;
   
-  // Сбрасываем состояние системы, если оно было в ошибке
-  if (systemState == "КОТЕЛ_ПОГАС" || systemState == "ОШИБКА_РОЗЖИГА") {
+  // Сбрасываем состояние системы, если оно было в ошибке / soft-stop
+  if (systemState == "КОТЕЛ_ПОГАС" || systemState == "ОШИБКА_РОЗЖИГА" ||
+      systemState == "COAL_BURNED" || systemState == "HEATING_TIMEOUT") {
     systemState = "IDLE";
   }
   
@@ -4517,6 +4735,7 @@ void handleSystemReset() {
   maxTempDuringFan = 0.0;
   
   Serial.println("[API] Сброс состояния системы выполнен");
+  logEvent("SYSTEM_RESET", "web");
   
   DynamicJsonDocument doc(200);
   doc["success"] = true;
@@ -6347,17 +6566,22 @@ void setup() {
   loadComfortSettingsFromEEPROM();
   loadWorkModeFromEEPROM();
   loadBootLogFromEEPROM();
-  loadEventLogFromEEPROM();
   loadFanStatsFromEEPROM();
   loadOtaResult();
   
-  // Определение состояния системы при запуске
-  determineSystemStateOnStartup();
-  
-  // Инициализация SPIFFS (оптимизировано: убраны лишние проверки)
+  // SPIFFS до журнала событий и startup (events.log на файловой системе)
   if (!SPIFFS.begin(true)) {
     Serial.println("[ОШИБКА] SPIFFS не смонтирован!");
+  } else {
+    loadEventLogFromSpiffs();
   }
+  
+  // Определение состояния системы при запуске (всегда рабочий режим после питания)
+  determineSystemStateOnStartup();
+  
+  char bootDetails[48];
+  snprintf(bootDetails, sizeof(bootDetails), "reason=%s #%lu", lastResetReason.c_str(), (unsigned long)bootCount);
+  logEvent("BOOT", bootDetails);
   
   // Попытка подключения к WiFi с приоритетом
   bool wifiConnected = false;
@@ -6506,6 +6730,9 @@ void setup() {
   server.on("/api/system/reboot", HTTP_POST, handleReboot);
   server.on("/api/system/bootcount/reset", HTTP_POST, handleBootCountReset);
   server.on("/api/system/log", HTTP_GET, handleBootLog);
+  server.on("/api/events", HTTP_GET, handleEventsGet);
+  server.on("/events.txt", HTTP_GET, handleEventsTxt);
+  server.on("/api/events/clear", HTTP_POST, handleEventsClear);
   server.on("/api/system/timers", HTTP_GET, handleTimers);
   server.on("/api/coalFeeding", HTTP_GET, handleCoalFeeding);
   server.on("/api/coalFeeding", HTTP_POST, handleCoalFeeding);
@@ -6591,6 +6818,13 @@ void loop() {
   
   server.handleClient();
   
+  // Отложенная запись журнала событий (FAN_ON/OFF)
+  if (eventLogDirty && (now - lastEventLogFlush > 5000UL || now < lastEventLogFlush)) {
+    saveEventLogToSpiffs();
+    eventLogDirty = false;
+    lastEventLogFlush = now;
+  }
+  
   // Автоматическая проверка обновлений
   if (updateSettings.autoCheckEnabled && WiFi.status() == WL_CONNECTED) {
     unsigned long timeSinceLastCheck = (updateSettings.lastCheckTime == 0) ? ULONG_MAX :
@@ -6613,7 +6847,12 @@ void loop() {
   
   // Обработка MQTT (неблокирующая)
   if (mqttSettings.enabled) {
+    static bool mqttWasConnected = false;
     if (!mqttClient.connected()) {
+      if (mqttWasConnected) {
+        logEvent("MQTT_DISCONNECT", "");
+        mqttWasConnected = false;
+      }
       static unsigned long lastReconnect = 0;
       // Защита от переполнения millis()
       if (now - lastReconnect > 10000 || now < lastReconnect) {  // Пробуем реже - каждые 10 секунд
@@ -6621,6 +6860,7 @@ void loop() {
         mqttConnect();
       }
     } else {
+      mqttWasConnected = true;
       // loop() не должен блокировать, но ограничим время
       mqttClient.loop();
       // Публикация статуса системы после обработки входящих команд (не из callback)
@@ -6696,8 +6936,8 @@ void loop() {
     if (fanState) {
       setFanDesired(false);
     }
-  } else if (systemEnabled && !manualFanControl) {
-    // Автоматическое управление вентилятором
+  } else if (systemEnabled && !manualFanControl && !ignitionInProgress) {
+    // Автоматическое управление вентилятором (не во время розжига — иначе shouldTurnOff гасит FAN сразу)
     static int lastWorkMode = -1;
     if (lastWorkMode != workMode) {
       // Переключение режима - сброс состояний
@@ -6806,6 +7046,11 @@ void loop() {
       // 5. Защита от перегрева
       if (supplyTemp >= autoSettings.overheatTemp) {
         setFanDesired(false);
+        if (systemState != "OVERHEAT") {
+          char details[40];
+          snprintf(details, sizeof(details), "T=%.1f limit=%.1f", supplyTemp, autoSettings.overheatTemp);
+          logEvent("OVERHEAT", details);
+        }
         systemState = "OVERHEAT";
         Serial.print("[Безопасность] Перегрев! Температура ");
         Serial.print(supplyTemp);
@@ -6905,31 +7150,28 @@ void loop() {
   if (loopEndTime >= loopStartTime) {
     currentLoopTime = loopEndTime - loopStartTime;
   } else {
-    // Переполнение произошло
-    currentLoopTime = (ULONG_MAX - loopStartTime) + loopEndTime;
+    currentLoopTime = (ULONG_MAX - loopStartTime) + loopEndTime + 1UL;
   }
   
-  // Накапливаем время выполнения и счетчик циклов
   totalLoopTime += currentLoopTime;
   loopCount++;
+  unsigned long thisLoopMs = currentLoopTime / 1000UL;
+  if (thisLoopMs > maxLoopMs) {
+    maxLoopMs = thisLoopMs;
+  }
   
-  // Обновляем загрузку CPU раз в секунду
+  // Реальная загрузка: доля времени, проведённого в loop(), от календарного периода
   if (now - lastCpuUpdate >= CPU_UPDATE_INTERVAL || now < lastCpuUpdate) {
-    if (loopCount > 0) {
-      // Вычисляем среднее время выполнения loop() за период обновления
-      unsigned long avgLoopTime = totalLoopTime / loopCount;
-      
-      // Вычисляем загрузку CPU как процент от периода обновления
-      // Период обновления = 1 секунда = 1,000,000 мкс
-      // Загрузка = (среднее время выполнения / период обновления) * 100
-      cpuLoad = (avgLoopTime / 10000.0);  // 10000 мкс = 1% от 1 секунды
-      if (cpuLoad > 100.0) cpuLoad = 100.0;
-      if (cpuLoad < 0.0) cpuLoad = 0.0;
-    } else {
-      cpuLoad = 0.0;
-    }
-    
-    // Сбрасываем счетчики для следующего периода
+    unsigned long elapsedMs = (now >= lastCpuUpdate && lastCpuUpdate > 0)
+        ? (now - lastCpuUpdate)
+        : CPU_UPDATE_INTERVAL;
+    if (elapsedMs < 1) elapsedMs = 1;
+    float busyMs = totalLoopTime / 1000.0f;
+    cpuLoad = (busyMs / (float)elapsedMs) * 100.0f;
+    if (cpuLoad > 100.0f) cpuLoad = 100.0f;
+    if (cpuLoad < 0.0f) cpuLoad = 0.0f;
+    maxLoopMsPub = maxLoopMs;
+    maxLoopMs = 0;
     totalLoopTime = 0;
     loopCount = 0;
     lastCpuUpdate = now;
