@@ -348,6 +348,42 @@
             margin: 20px 0 !important;
         }
 
+        /* Компактный главный экран телефона — один экран без прокрутки */
+        @media (max-width: 480px) {
+            body { font-size: 14px; }
+            .container { padding: 4px 6px; }
+            .header { padding: 6px 8px; margin-bottom: 4px; }
+            .header h1 { font-size: 1.15em; }
+            .status-bar {
+                flex-wrap: wrap;
+                gap: 4px 8px;
+                font-size: 0.72em;
+                padding: 4px 0;
+            }
+            .status-indicator { min-width: auto; }
+            .main-page { padding: 4px 2px 8px; }
+            .temperature-display { gap: 4px; margin-bottom: 4px; }
+            .temp-card { padding: 8px 6px !important; border-radius: 10px !important; }
+            .temp-label { font-size: 0.75em !important; margin-bottom: 2px !important; }
+            .temp-value { font-size: 1.35em !important; margin: 4px 0 !important; }
+            .main-temps-container { margin-bottom: 4px; gap: 4px; }
+            .main-temps-container .temp-card {
+                padding: 10px 8px !important;
+                border-radius: 12px !important;
+            }
+            .main-temps-container .temp-label { font-size: 0.85em !important; }
+            .main-temps-container .temp-value { font-size: 2em !important; margin: 6px 0 !important; }
+            .hide-mobile-compact { display: none !important; }
+            #espSysStrip { display: none !important; }
+            .status-indicator.cpu-ram-merged { display: inline-flex !important; }
+            .mobile-compact-block { padding: 6px !important; margin: 4px 0 !important; font-size: 0.78em !important; }
+            .dropdown-item.hide-mobile-compact { display: none !important; }
+        }
+
+        @media (min-width: 481px) {
+            .status-indicator.cpu-ram-merged { display: none !important; }
+        }
+
         /* Адаптация для книжной ориентации */
         @media (orientation: portrait) and (max-width: 768px) {
             .main-temps-container {
@@ -865,7 +901,7 @@
             </div>
             <div class="dropdown-menu" id="dropdownMenu">
                 <div class="dropdown-item" onclick="showSettings('auto')">⚙️ Режим Авто</div>
-                <div class="dropdown-item" onclick="showSettings('comfort')">🏠 Режим Комфорт</div>
+                <div class="dropdown-item hide-mobile-compact" onclick="showSettings('comfort')">🏠 Режим Комфорт</div>
                 <div class="dropdown-item" onclick="showSettings('mqtt')">📡 MQTT</div>
                 <div class="dropdown-item" onclick="showSettings('wifi')">📶 WiFi</div>
                 <div class="dropdown-item" onclick="showSettings('sensors')">🌡️ Датчики</div>
@@ -907,6 +943,10 @@
                     <span style="color: #aaa;">RAM:</span>
                     <strong id="heapStatus">--</strong>
                 </div>
+                <div class="status-indicator cpu-ram-merged">
+                    <span style="color: #aaa;">Система:</span>
+                    <strong id="sysLoadMerged">--</strong>
+                </div>
             </div>
         </div>
 
@@ -936,8 +976,8 @@
                     </div>
                 </div>
                 
-                <!-- Карточка дома -->
-                <div class="temp-card" id="homeTempCard">
+                <!-- Карточка дома (скрыта на телефоне — датчик пока нет) -->
+                <div class="temp-card hide-mobile-compact" id="homeTempCard">
                     <div class="temp-label" id="homeTempLabel">Дом</div>
                     <div class="temp-value">
                         <span id="homeTempValue">--</span><span id="homeTempUnit" class="temp-unit">°C</span>
@@ -982,8 +1022,8 @@
                         <span class="temp-trend-arrow" id="outdoorTrendArrow" style="display: none;"></span>
                     </div>
                 </div>
-                <!-- Переключатель режимов работы -->
-                <div class="temp-card sensor-card" style="display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 12px;">
+                <!-- Переключатель режимов (комфорт — hide на телефоне) -->
+                <div class="temp-card sensor-card hide-mobile-compact" style="display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 12px;">
                     <div class="temp-label" style="margin-bottom: 8px;">Режим работы</div>
                     <div style="display: flex; align-items: center; justify-content: center; gap: 8px;">
                         <label class="switch" style="width: 50px; height: 24px; margin: 0;">
@@ -997,7 +1037,7 @@
             </div>
             
             <!-- Статус устройств -->
-            <div style="background: #2a2a2a; border-radius: 12px; padding: 8px; margin: 6px 0; display: flex; justify-content: space-around; font-size: 0.85em;">
+            <div class="mobile-compact-block" style="background: #2a2a2a; border-radius: 12px; padding: 8px; margin: 6px 0; display: flex; justify-content: space-around; font-size: 0.85em;">
                 <div style="text-align: center;">
                     <div style="color: #aaa; font-size: 0.9em;">Вентилятор</div>
                     <div id="fanStatusText" style="font-weight: 600; color: #888;">ВЫКЛ</div>
@@ -2721,6 +2761,17 @@
                         heapMain.textContent = heapKb + ' КБ';
                         heapMain.style.color = (Number(d.freeHeap) < 50000) ? '#E74C3C' : '#ecf0f1';
                     }
+                    var mergedEl = document.getElementById('sysLoadMerged');
+                    if (mergedEl) {
+                        var merged = '--';
+                        if (cpuVal !== null && !isNaN(cpuVal) && heapKb !== null) {
+                            merged = 'ЦП ' + cpuVal.toFixed(0) + '% · RAM ' + heapKb + ' КБ';
+                        }
+                        mergedEl.textContent = merged;
+                        if (cpuVal !== null && cpuVal >= 80) mergedEl.style.color = '#E74C3C';
+                        else if (cpuVal !== null && cpuVal >= 50) mergedEl.style.color = '#F39C12';
+                        else mergedEl.style.color = '#2ECC71';
+                    }
                     var fwMain = document.getElementById('fwVersionMain');
                     if (fwMain && d.firmwareVersion) {
                         fwMain.textContent = d.firmwareVersion;
@@ -3563,21 +3614,19 @@
                         container.innerHTML = '<div style="text-align: center; color: #888; padding: 20px;">Журнал пуст</div>';
                         return;
                     }
-                    let html = '<table style="width: 100%; border-collapse: collapse; font-size: 0.85em;">';
-                    html += '<thead><tr style="border-bottom: 2px solid #3a3a3a;">';
-                    html += '<th style="text-align: left; padding: 6px; color: #aaa;">Время</th>';
-                    html += '<th style="text-align: left; padding: 6px; color: #aaa;">Событие</th>';
-                    html += '<th style="text-align: left; padding: 6px; color: #aaa;">Детали</th>';
-                    html += '</tr></thead><tbody>';
+                    let html = '<ul style="list-style: none; margin: 0; padding: 0; font-size: 0.9em;">';
                     const sorted = d.entries.slice().reverse();
                     sorted.forEach(function(entry) {
-                        html += '<tr style="border-bottom: 1px solid #3a3a3a;">';
-                        html += '<td style="padding: 6px; color: #aaa;">' + (entry.datetime || 'N/A') + '</td>';
-                        html += '<td style="padding: 6px; color: #4A90E2;">' + (entry.type || '') + '</td>';
-                        html += '<td style="padding: 6px; color: #fff;">' + (entry.details || '') + '</td>';
-                        html += '</tr>';
+                        var line = entry.text || entry.details || entry.type || '';
+                        if (!entry.text && entry.type && entry.details) {
+                            line = entry.type + ' — ' + entry.details;
+                        }
+                        html += '<li style="padding: 8px 4px; border-bottom: 1px solid #3a3a3a; line-height: 1.35;">';
+                        html += '<div style="color: #888; font-size: 0.85em;">' + (entry.datetime || 'N/A') + '</div>';
+                        html += '<div style="color: #ecf0f1;">' + line + '</div>';
+                        html += '</li>';
                     });
-                    html += '</tbody></table>';
+                    html += '</ul>';
                     container.innerHTML = html;
                 })
                 .catch(e => {

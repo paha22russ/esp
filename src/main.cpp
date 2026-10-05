@@ -47,7 +47,7 @@
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.37"
+#define FIRMWARE_VERSION "4.2.38"
 #define DISCOVERY_UDP_PORT 4210
 #define DISCOVERY_BEACON_INTERVAL_MS 1000
 
@@ -1858,6 +1858,11 @@ void handleEventsGet() {
     } else {
       entry["datetime"] = "N/A";
     }
+    if (eventLog[idx].details[0]) {
+      entry["text"] = eventLog[idx].details;
+    } else {
+      entry["text"] = eventLog[idx].eventType;
+    }
   }
   doc["total"] = entries.size();
   doc["max"] = EVENT_LOG_MAX_ENTRIES;
@@ -1875,18 +1880,23 @@ void handleEventsTxt() {
   }
   String body;
   body.reserve(4096);
-  body += "# Kotel event journal\n";
-  body += "# timestamp\ttype\tdetails\n";
+  body += "# Журнал событий котла\n";
   for (int i = 0; i < EVENT_LOG_MAX_ENTRIES; i++) {
     int idx = (eventLogWriteIndex + i) % EVENT_LOG_MAX_ENTRIES;
     if (!eventLog[idx].valid || eventLog[idx].eventType[0] == '\0') {
       continue;
     }
-    body += String(eventLog[idx].timestamp);
-    body += '\t';
-    body += eventLog[idx].eventType;
-    body += '\t';
-    body += eventLog[idx].details;
+    char dt[24] = "---- -- -- --:--:--";
+    if (eventLog[idx].timestamp > 0) {
+      time_t t = eventLog[idx].timestamp;
+      struct tm* timeInfo = localtime(&t);
+      if (timeInfo) {
+        strftime(dt, sizeof(dt), "%Y-%m-%d %H:%M:%S", timeInfo);
+      }
+    }
+    body += dt;
+    body += " | ";
+    body += eventLog[idx].details[0] ? eventLog[idx].details : eventLog[idx].eventType;
     body += '\n';
   }
   server.sendHeader("Content-Disposition", "attachment; filename=\"kotel-events.txt\"");
@@ -1929,7 +1939,8 @@ void logEvent(const char* eventType, const char* details) {
   eventLogDirty = true;
   
   // FAN_ON/OFF часто — отложенная запись; критичные события — сразу
-  bool defer = (strcmp(eventType, "FAN_ON") == 0 || strcmp(eventType, "FAN_OFF") == 0);
+  bool defer = (strcmp(eventType, "FAN") == 0 || strcmp(eventType, "PUMP") == 0 ||
+                strcmp(eventType, "SETPOINT") == 0);
   if (!defer) {
     saveEventLogToSpiffs();
     eventLogDirty = false;
@@ -1956,10 +1967,16 @@ void saveEventLogToSpiffs() {
     if (!eventLog[idx].valid || eventLog[idx].eventType[0] == '\0') {
       continue;
     }
-    f.printf("%lu\t%s\t%s\n",
-             (unsigned long)eventLog[idx].timestamp,
-             eventLog[idx].eventType,
-             eventLog[idx].details);
+    char dt[24] = "---- -- -- --:--:--";
+    if (eventLog[idx].timestamp > 0) {
+      time_t t = eventLog[idx].timestamp;
+      struct tm* timeInfo = localtime(&t);
+      if (timeInfo) {
+        strftime(dt, sizeof(dt), "%Y-%m-%d %H:%M:%S", timeInfo);
+      }
+    }
+    const char* human = eventLog[idx].details[0] ? eventLog[idx].details : eventLog[idx].eventType;
+    f.printf("%s | %s\n", dt, human);
   }
   f.close();
 }
@@ -1988,20 +2005,31 @@ void loadEventLogFromSpiffs() {
     if (line.length() < 3) {
       continue;
     }
+    int pipe = line.indexOf(" | ");
     int t1 = line.indexOf('\t');
     int t2 = (t1 >= 0) ? line.indexOf('\t', t1 + 1) : -1;
-    if (t1 < 0 || t2 < 0) {
+    if (pipe < 0 && (t1 < 0 || t2 < 0)) {
       continue;
     }
     EventLogEntry entry;
-    entry.timestamp = (uint32_t)line.substring(0, t1).toInt();
-    String et = line.substring(t1 + 1, t2);
-    String det = line.substring(t2 + 1);
-    strncpy(entry.eventType, et.c_str(), sizeof(entry.eventType) - 1);
-    entry.eventType[sizeof(entry.eventType) - 1] = '\0';
-    strncpy(entry.details, det.c_str(), sizeof(entry.details) - 1);
-    entry.details[sizeof(entry.details) - 1] = '\0';
     entry.valid = true;
+    if (pipe >= 0) {
+      entry.timestamp = 0;
+      strncpy(entry.eventType, "LOG", sizeof(entry.eventType) - 1);
+      entry.eventType[sizeof(entry.eventType) - 1] = '\0';
+      String humanPart = line.substring(pipe + 3);
+      humanPart.trim();
+      strncpy(entry.details, humanPart.c_str(), sizeof(entry.details) - 1);
+      entry.details[sizeof(entry.details) - 1] = '\0';
+    } else {
+      entry.timestamp = (uint32_t)line.substring(0, t1).toInt();
+      String et = line.substring(t1 + 1, t2);
+      String det = line.substring(t2 + 1);
+      strncpy(entry.eventType, et.c_str(), sizeof(entry.eventType) - 1);
+      entry.eventType[sizeof(entry.eventType) - 1] = '\0';
+      strncpy(entry.details, det.c_str(), sizeof(entry.details) - 1);
+      entry.details[sizeof(entry.details) - 1] = '\0';
+    }
     eventLog[eventLogWriteIndex] = entry;
     eventLogWriteIndex = (eventLogWriteIndex + 1) % EVENT_LOG_MAX_ENTRIES;
   }
@@ -2602,6 +2630,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       setpoint = newSetpoint;
       autoSettings.setpoint = newSetpoint;
       saveAutoSettingsToEEPROM();
+      char det[24];
+      snprintf(det, sizeof(det), "Уставка %.1f°C MQTT", setpoint);
+      logEvent("SETPOINT", det);
     }
   }
   
@@ -3066,6 +3097,9 @@ void handleEncoderRotation() {
       String topic = mqttSettings.prefix + "/setpoint";
       mqttClient.publish(topic.c_str(), String(setpoint, 1).c_str(), false);
     }
+    char det[24];
+    snprintf(det, sizeof(det), "Уставка %.1f°C энкодер", setpoint);
+    logEvent("SETPOINT", det);
     
     lastEncoderRotation = millis(); // Запоминаем время поворота
   }
@@ -3299,10 +3333,10 @@ void setFanDesired(bool on) {
   fanState = on;
   if (on) {
     beginFanCycle(millis());
-    logEvent("FAN_ON", "");
+    logEvent("FAN", "Вентилятор вкл");
   } else {
     endFanCycle();
-    logEvent("FAN_OFF", "");
+    logEvent("FAN", "Вентилятор выкл");
   }
   writeActuatorGpios();
 }
@@ -3317,6 +3351,7 @@ void setPumpDesired(bool on) {
   pumpState = on;
   int pumpLevel = pumpState ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
   digitalWrite(PIN_RELAY_PUMP, pumpLevel);
+  logEvent("PUMP", on ? "Насос 1 вкл" : "Насос 1 выкл");
 }
 
 void setPump2Desired(bool on) {
@@ -3329,6 +3364,7 @@ void setPump2Desired(bool on) {
   pump2State = on;
   int pump2Level = pump2State ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
   digitalWrite(PIN_RELAY_PUMP2, pump2Level);
+  logEvent("PUMP", on ? "Насос 2 вкл" : "Насос 2 выкл");
 }
 
 // Применение спроса насосов с учётом контуров и safety (rise/frost)
@@ -4016,6 +4052,9 @@ void handleSetpoint() {
         String topic = mqttSettings.prefix + "/setpoint";
         mqttClient.publish(topic.c_str(), String(setpoint, 1).c_str(), false);
       }
+      char det[24];
+      snprintf(det, sizeof(det), "Уставка %.1f°C веб", setpoint);
+      logEvent("SETPOINT", det);
       
       DynamicJsonDocument doc(200);
       doc["success"] = true;
@@ -4265,10 +4304,18 @@ void handleCircuits() {
       return;
     }
     if (doc.containsKey("circuit1Enabled")) {
-      circuit1Enabled = doc["circuit1Enabled"].as<bool>();
+      bool newVal = doc["circuit1Enabled"].as<bool>();
+      if (newVal != circuit1Enabled) {
+        circuit1Enabled = newVal;
+        logEvent("CIRC", newVal ? "Контур 1 разрешён" : "Контур 1 отключён");
+      }
     }
     if (doc.containsKey("circuit2Enabled")) {
-      circuit2Enabled = doc["circuit2Enabled"].as<bool>();
+      bool newVal = doc["circuit2Enabled"].as<bool>();
+      if (newVal != circuit2Enabled) {
+        circuit2Enabled = newVal;
+        logEvent("CIRC", newVal ? "Контур 2 разрешён" : "Контур 2 отключён");
+      }
     }
     saveRelaySettingsToEEPROM();
     // Немедленно применить выход насосов (отключение контура → насос OFF)
@@ -4319,6 +4366,9 @@ void handleAutoSettingsPost() {
         lastFanToggleTime = 0;
         lastFanToggleTemp = supplyTemp;
         Serial.println("[Auto] Setpoint changed - resetting fan toggle timers");
+        char det[24];
+        snprintf(det, sizeof(det), "Уставка %.1f°C настройки", newSetpoint);
+        logEvent("SETPOINT", det);
       }
       autoSettings.setpoint = newSetpoint;
     }
@@ -4376,6 +4426,7 @@ void handleWorkModePost() {
         heatingStartTime = 0;
         
         saveWorkModeToEEPROM();
+        logEvent("MODE", (workMode == 0) ? "Режим: Авто" : "Режим: Комфорт");
         
         server.send(200, "application/json", "{\"success\":true,\"mode\":" + String(workMode) + "}");
       } else {
