@@ -47,9 +47,27 @@
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.38"
+#define FIRMWARE_VERSION "4.2.39"
 #define DISCOVERY_UDP_PORT 4210
 #define DISCOVERY_BEACON_INTERVAL_MS 1000
+
+// Serial debug logs: off saves ~10–18KB flash (KOTEL_SERIAL_LOG=1 to re-enable)
+#ifndef KOTEL_SERIAL_LOG
+#define KOTEL_SERIAL_LOG 0
+#endif
+#if KOTEL_SERIAL_LOG
+#define KLog Serial
+#else
+struct KotelLogSink {
+  template<typename T> size_t print(const T&) { return 0; }
+  template<typename T> size_t print(const T&, int) { return 0; }
+  size_t println() { return 0; }
+  template<typename T> size_t println(const T&) { return 0; }
+  template<typename T> size_t println(const T&, int) { return 0; }
+  size_t printf(const char*, ...) { return 0; }
+};
+static KotelLogSink KLog;
+#endif
 
 // GitHub репозиторий для обновлений
 #define GITHUB_REPO_OWNER "paha22russ"
@@ -574,7 +592,7 @@ void updateDisplay() {
     // Мигание статуса погасания (~2 раза/сек)
     bool blinkOn = ((now / 400) % 2) == 0;
     if (blinkOn) {
-      u8g2.setFont(u8g2_font_6x12_t_cyrillic);
+      u8g2.setFont(u8g2_font_5x8_t_cyrillic);
       if (systemState == "ОШИБКА_РОЗЖИГА") {
         u8g2.drawUTF8(0, 40, "ОШИБКА РОЗЖИГА");
       } else {
@@ -905,7 +923,7 @@ void checkSensorsFreeze() {
     if (timeSinceValid >= SENSORS_FREEZE_TIMEOUT) {
       needReset = true;
       frozenSensor = "supply";
-      Serial.print("[Зависание датчиков] Датчик подачи завис (0 или 85°C) более 60 секунд, выполняю сброс питания...");
+      KLog.print("[Зависание датчиков] Датчик подачи завис (0 или 85°C) более 60 секунд, выполняю сброс питания...");
     }
   }
   
@@ -915,7 +933,7 @@ void checkSensorsFreeze() {
     if (timeSinceValid >= SENSORS_FREEZE_TIMEOUT) {
       needReset = true;
       frozenSensor = "return";
-      Serial.print("[Зависание датчиков] Датчик обратки завис (0 или 85°C) более 60 секунд, выполняю сброс питания...");
+      KLog.print("[Зависание датчиков] Датчик обратки завис (0 или 85°C) более 60 секунд, выполняю сброс питания...");
     }
   }
   
@@ -925,7 +943,7 @@ void checkSensorsFreeze() {
     if (timeSinceValid >= SENSORS_FREEZE_TIMEOUT) {
       needReset = true;
       frozenSensor = "boiler";
-      Serial.print("[Зависание датчиков] Датчик котельной завис (0 или 85°C) более 60 секунд, выполняю сброс питания...");
+      KLog.print("[Зависание датчиков] Датчик котельной завис (0 или 85°C) более 60 секунд, выполняю сброс питания...");
     }
   }
   
@@ -937,14 +955,14 @@ void checkSensorsFreeze() {
       if (timeSinceValid >= SENSORS_FREEZE_TIMEOUT) {
         needReset = true;
         frozenSensor = "outside";
-        Serial.print("[Зависание датчиков] Датчик улицы завис (85°C) более 60 секунд, выполняю сброс питания...");
+        KLog.print("[Зависание датчиков] Датчик улицы завис (85°C) более 60 секунд, выполняю сброс питания...");
       }
     }
   }
   
   // Если нужно сбросить питание
   if (needReset) {
-    Serial.println(frozenSensor);
+    KLog.println(frozenSensor);
     sensorsRelayState = false;
     int sensorsLevel = relaySettings.sensorsOffIsLow ? LOW : HIGH;
     digitalWrite(PIN_RELAY_SENSORS, sensorsLevel);
@@ -972,7 +990,7 @@ void checkSensorsDetection() {
       digitalWrite(PIN_RELAY_SENSORS, HIGH);
       sensorsAutoResetInProgress = false;
       lastSensorsDetectedTime = now;  // Сбрасываем таймер после сброса
-      Serial.println("[Авто-сброс датчиков] Реле включено после автоматического сброса");
+      KLog.println("[Авто-сброс датчиков] Реле включено после автоматического сброса");
     }
     return;  // Во время сброса не проверяем обнаружение
   }
@@ -1002,7 +1020,7 @@ void checkSensorsDetection() {
         
         if (timeSinceDetection >= SENSORS_AUTO_RESET_TIMEOUT) {
           // Прошло 60 секунд без обнаружения - выполняем автоматический сброс
-          Serial.println("[Авто-сброс датчиков] Датчики не обнаружены 60 секунд, выполняю сброс питания...");
+          KLog.println("[Авто-сброс датчиков] Датчики не обнаружены 60 секунд, выполняю сброс питания...");
           sensorsRelayState = false;
           int sensorsLevel = relaySettings.sensorsOffIsLow ? LOW : HIGH;
           digitalWrite(PIN_RELAY_SENSORS, sensorsLevel);
@@ -1103,7 +1121,7 @@ void loadAutoSettingsFromEEPROM() {
       saveAutoSettingsToEEPROM();
     }
   } else {
-    Serial.println("EEPROM empty, using defaults");
+    KLog.println("EEPROM empty, using defaults");
     saveAutoSettingsToEEPROM();
   }
   EEPROM.end();
@@ -1179,7 +1197,7 @@ void saveSensorMappingToEEPROM() {
   }
   EEPROM.commit();
   EEPROM.end();
-  Serial.println("Sensor mapping saved to EEPROM");
+  KLog.println("Sensor mapping saved to EEPROM");
 }
 
 void loadSensorMappingFromEEPROM() {
@@ -1201,7 +1219,7 @@ void loadSensorMappingFromEEPROM() {
       if (doc.containsKey("return")) sensorMapping.return_sensor = doc["return"].as<String>();
       if (doc.containsKey("boiler")) sensorMapping.boiler = doc["boiler"].as<String>();
       if (doc.containsKey("outside")) sensorMapping.outside = doc["outside"].as<String>();
-      Serial.println("Sensor mapping loaded from EEPROM");
+      KLog.println("Sensor mapping loaded from EEPROM");
     }
   }
   EEPROM.end();
@@ -1212,7 +1230,7 @@ void saveSystemEnabledToEEPROM() {
   EEPROM.put(EEPROM_ADDR_SYSTEM, systemEnabled);
   EEPROM.commit();
   EEPROM.end();
-  Serial.println("System enabled saved to EEPROM");
+  KLog.println("System enabled saved to EEPROM");
 }
 
 void loadSystemEnabledFromEEPROM() {
@@ -1222,8 +1240,8 @@ void loadSystemEnabledFromEEPROM() {
   
   if (magic == EEPROM_MAGIC) {
     EEPROM.get(EEPROM_ADDR_SYSTEM, systemEnabled);
-    Serial.print("System enabled loaded from EEPROM: ");
-    Serial.println(systemEnabled);
+    KLog.print("System enabled loaded from EEPROM: ");
+    KLog.println(systemEnabled);
   } else {
     systemEnabled = true;  // По умолчанию включена
     saveSystemEnabledToEEPROM();
@@ -1296,16 +1314,16 @@ bool connectToWiFi() {
       // Неблокирующая задержка 1 секунда с yield()
       if (now - lastCheckTime >= 1000 || now < lastCheckTime) {
         lastCheckTime = now;
-        Serial.print(".");
+        KLog.print(".");
         attempts++;
         
         // Периодически проверяем статус
         if (attempts % 5 == 0) {
-          Serial.print(" [");
-          Serial.print(attempts);
-          Serial.print("/");
-          Serial.print(maxAttempts);
-          Serial.println("]");
+          KLog.print(" [");
+          KLog.print(attempts);
+          KLog.print("/");
+          KLog.print(maxAttempts);
+          KLog.println("]");
         }
       }
       yield(); // Позволяем другим задачам выполняться
@@ -1332,16 +1350,16 @@ bool connectToWiFi() {
       // Неблокирующая задержка 1 секунда с yield()
       if (now - lastCheckTime >= 1000 || now < lastCheckTime) {
         lastCheckTime = now;
-        Serial.print(".");
+        KLog.print(".");
         attempts++;
       }
       yield(); // Позволяем другим задачам выполняться
     }
     
     if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\nПодключено к резервному WiFi!");
-      Serial.print("IP адрес: ");
-      Serial.println(WiFi.localIP());
+      KLog.println("\nПодключено к резервному WiFi!");
+      KLog.print("IP адрес: ");
+      KLog.println(WiFi.localIP());
       return true;
     } else {
     }
@@ -1391,18 +1409,18 @@ void loadNTPSettingsFromEEPROM() {
         if (doc.containsKey("timezone")) ntpSettings.timezone = doc["timezone"];
         if (doc.containsKey("updateInterval")) ntpSettings.updateInterval = doc["updateInterval"];
       } else {
-        Serial.println("Error parsing NTP settings from EEPROM, using defaults");
+        KLog.println("Error parsing NTP settings from EEPROM, using defaults");
         // Сохраняем настройки по умолчанию
         saveNTPSettingsToEEPROM();
       }
     } else {
       // Настройки не найдены, сохраняем по умолчанию
-      Serial.println("NTP settings not found in EEPROM, saving defaults");
+      KLog.println("NTP settings not found in EEPROM, saving defaults");
       saveNTPSettingsToEEPROM();
     }
   } else {
     // EEPROM не инициализирован, сохраняем настройки по умолчанию
-    Serial.println("EEPROM not initialized, saving default NTP settings");
+    KLog.println("EEPROM not initialized, saving default NTP settings");
     saveNTPSettingsToEEPROM();
   }
   EEPROM.end();
@@ -1452,18 +1470,18 @@ void loadMLSettingsFromEEPROM() {
           }
         }
       } else {
-        Serial.println("Error parsing ML settings from EEPROM, using defaults");
+        KLog.println("Error parsing ML settings from EEPROM, using defaults");
         // Сохраняем настройки по умолчанию если ошибка парсинга
         saveMLSettingsToEEPROM();
       }
     } else {
       // Настройки не найдены, сохраняем по умолчанию (включено)
-      Serial.println("ML settings not found in EEPROM, saving defaults (enabled=true)");
+      KLog.println("ML settings not found in EEPROM, saving defaults (enabled=true)");
       saveMLSettingsToEEPROM();
     }
   } else {
     // EEPROM не инициализирован, сохраняем настройки по умолчанию
-    Serial.println("EEPROM not initialized, saving default ML settings (enabled=true)");
+    KLog.println("EEPROM not initialized, saving default ML settings (enabled=true)");
     saveMLSettingsToEEPROM();
   }
   EEPROM.end();
@@ -1482,8 +1500,8 @@ void saveRelaySettingsToEEPROM() {
   String json;
   serializeJson(doc, json);
   
-  Serial.print("[Реле] Сохранение в EEPROM: ");
-  Serial.println(json);
+  KLog.print("[Реле] Сохранение в EEPROM: ");
+  KLog.println(json);
   
   int len = json.length();
   EEPROM.put(EEPROM_ADDR_RELAY, len);
@@ -1492,9 +1510,9 @@ void saveRelaySettingsToEEPROM() {
   }
   
   if (EEPROM.commit()) {
-    Serial.println("[Реле] Настройки успешно сохранены в EEPROM");
+    KLog.println("[Реле] Настройки успешно сохранены в EEPROM");
   } else {
-    Serial.println("[Реле] ОШИБКА: Не удалось сохранить в EEPROM!");
+    KLog.println("[Реле] ОШИБКА: Не удалось сохранить в EEPROM!");
   }
   EEPROM.end();
 }
@@ -1516,22 +1534,22 @@ void loadRelaySettingsFromEEPROM() {
       DynamicJsonDocument doc(256);
       DeserializationError error = deserializeJson(doc, json);
       if (!error) {
-        Serial.print("[Реле] Загружено из EEPROM: ");
-        Serial.println(json);
+        KLog.print("[Реле] Загружено из EEPROM: ");
+        KLog.println(json);
         if (doc.containsKey("fanOffIsLow")) {
           relaySettings.fanOffIsLow = doc["fanOffIsLow"].as<bool>();
-          Serial.print("[Реле] fanOffIsLow загружено: ");
-          Serial.println(relaySettings.fanOffIsLow ? "true" : "false");
+          KLog.print("[Реле] fanOffIsLow загружено: ");
+          KLog.println(relaySettings.fanOffIsLow ? "true" : "false");
         }
         if (doc.containsKey("pumpOffIsLow")) {
           relaySettings.pumpOffIsLow = doc["pumpOffIsLow"].as<bool>();
-          Serial.print("[Реле] pumpOffIsLow загружено: ");
-          Serial.println(relaySettings.pumpOffIsLow ? "true" : "false");
+          KLog.print("[Реле] pumpOffIsLow загружено: ");
+          KLog.println(relaySettings.pumpOffIsLow ? "true" : "false");
         }
         if (doc.containsKey("sensorsOffIsLow")) {
           relaySettings.sensorsOffIsLow = doc["sensorsOffIsLow"].as<bool>();
-          Serial.print("[Реле] sensorsOffIsLow загружено: ");
-          Serial.println(relaySettings.sensorsOffIsLow ? "true" : "false");
+          KLog.print("[Реле] sensorsOffIsLow загружено: ");
+          KLog.println(relaySettings.sensorsOffIsLow ? "true" : "false");
         }
         if (doc.containsKey("circuit1Enabled")) {
           circuit1Enabled = doc["circuit1Enabled"].as<bool>();
@@ -1539,19 +1557,19 @@ void loadRelaySettingsFromEEPROM() {
         if (doc.containsKey("circuit2Enabled")) {
           circuit2Enabled = doc["circuit2Enabled"].as<bool>();
         }
-        Serial.println("[Реле] Настройки успешно загружены из EEPROM");
+        KLog.println("[Реле] Настройки успешно загружены из EEPROM");
       } else {
-        Serial.print("[Реле] Ошибка парсинга из EEPROM: ");
-        Serial.println(error.c_str());
-        Serial.println("[Реле] Используются настройки по умолчанию");
+        KLog.print("[Реле] Ошибка парсинга из EEPROM: ");
+        KLog.println(error.c_str());
+        KLog.println("[Реле] Используются настройки по умолчанию");
         saveRelaySettingsToEEPROM();
       }
     } else {
-      Serial.println("Relay settings not found in EEPROM, saving defaults");
+      KLog.println("Relay settings not found in EEPROM, saving defaults");
       saveRelaySettingsToEEPROM();
     }
   } else {
-    Serial.println("EEPROM not initialized, saving default relay settings");
+    KLog.println("EEPROM not initialized, saving default relay settings");
     saveRelaySettingsToEEPROM();
   }
   EEPROM.end();
@@ -1681,15 +1699,15 @@ void loadWorkModeFromEEPROM() {
     EEPROM.get(EEPROM_ADDR_WORKMODE, mode);
     if (mode == 0 || mode == 1) {
       workMode = mode;
-      Serial.print("[Boot] Work mode loaded from EEPROM: ");
-      Serial.println(workMode == 0 ? "Авто" : "Комфорт");
+      KLog.print("[Boot] Work mode loaded from EEPROM: ");
+      KLog.println(workMode == 0 ? "Авто" : "Комфорт");
     } else {
       workMode = 0;  // По умолчанию Авто
-      Serial.println("[Boot] Invalid work mode in EEPROM, using default: Авто");
+      KLog.println("[Boot] Invalid work mode in EEPROM, using default: Авто");
     }
   } else {
     workMode = 0;  // По умолчанию Авто
-    Serial.println("[Boot] EEPROM not initialized, using default work mode: Авто");
+    KLog.println("[Boot] EEPROM not initialized, using default work mode: Авто");
   }
   EEPROM.end();
 }
@@ -1700,8 +1718,8 @@ void saveBootCountToEEPROM() {
   EEPROM.put(EEPROM_ADDR_BOOT_COUNT, bootCount);
   EEPROM.commit();
   EEPROM.end();
-  Serial.print("[Boot] Boot count saved to EEPROM: ");
-  Serial.println(bootCount);
+  KLog.print("[Boot] Boot count saved to EEPROM: ");
+  KLog.println(bootCount);
 }
 
 // Загрузка счетчика перезагрузок из EEPROM
@@ -1712,11 +1730,11 @@ void loadBootCountFromEEPROM() {
   
   if (magic == EEPROM_MAGIC) {
     EEPROM.get(EEPROM_ADDR_BOOT_COUNT, bootCount);
-    Serial.print("[Boot] Boot count loaded from EEPROM: ");
-    Serial.println(bootCount);
+    KLog.print("[Boot] Boot count loaded from EEPROM: ");
+    KLog.println(bootCount);
   } else {
     bootCount = 0;
-    Serial.println("[Boot] EEPROM not initialized, starting boot count from 0");
+    KLog.println("[Boot] EEPROM not initialized, starting boot count from 0");
   }
   EEPROM.end();
 }
@@ -1768,10 +1786,10 @@ void saveBootLogEntry() {
   // Увеличиваем индекс (циклический буфер)
   bootLogWriteIndex = (bootLogWriteIndex + 1) % BOOT_LOG_MAX_ENTRIES;
   
-  Serial.print("[Boot] Log entry saved: bootCount=");
-  Serial.print(entry.bootCount);
-  Serial.print(", reason=");
-  Serial.println(entry.reason);
+  KLog.print("[Boot] Log entry saved: bootCount=");
+  KLog.print(entry.bootCount);
+  KLog.print(", reason=");
+  KLog.println(entry.reason);
 }
 
 // API: Получение журнала перезагрузок
@@ -1828,7 +1846,7 @@ void handleBootCountReset() {
   serializeJson(doc, response);
   server.send(200, "application/json", response);
   
-  Serial.println("[Boot] Boot count and log reset to 0");
+  KLog.println("[Boot] Boot count and log reset to 0");
 }
 
 // API: Журнал событий (JSON)
@@ -1921,7 +1939,7 @@ void handleEventsClear() {
   String response;
   serializeJson(doc, response);
   server.send(200, "application/json", response);
-  Serial.println("[Event] Journal cleared");
+  KLog.println("[Event] Journal cleared");
 }
 
 // Функция логирования событий (RAM + SPIFFS, переживает сброс питания)
@@ -1947,10 +1965,10 @@ void logEvent(const char* eventType, const char* details) {
     lastEventLogFlush = millis();
   }
   
-  Serial.print("[Event] ");
-  Serial.print(eventType);
-  Serial.print(": ");
-  Serial.println(details ? details : "");
+  KLog.print("[Event] ");
+  KLog.print(eventType);
+  KLog.print(": ");
+  KLog.println(details ? details : "");
 }
 
 // Сохранение журнала событий в SPIFFS (переживает power-cycle)
@@ -2034,7 +2052,7 @@ void loadEventLogFromSpiffs() {
     eventLogWriteIndex = (eventLogWriteIndex + 1) % EVENT_LOG_MAX_ENTRIES;
   }
   f.close();
-  Serial.println("[Event] Journal loaded from SPIFFS");
+  KLog.println("[Event] Journal loaded from SPIFFS");
 }
 
 // Сохранение статистики вентилятора в EEPROM
@@ -2083,7 +2101,7 @@ void startIgnition() {
     }
     queueSystemEnabledMqtt();
     
-    Serial.println("[Котел] Розжиг начат");
+    KLog.println("[Котел] Розжиг начат");
   }
 }
 
@@ -2134,9 +2152,9 @@ void checkBoilerExtinguished(unsigned long now) {
         // Мягкое выключение: вентилятор стоп, насос на выбеге до стабилизации
         applySystemEnable(false, "extinguished");
         
-        Serial.print("[Котел] Обнаружено погасание! Падение температуры: ");
-        Serial.print(tempDrop);
-        Serial.println("°C");
+        KLog.print("[Котел] Обнаружено погасание! Падение температуры: ");
+        KLog.print(tempDrop);
+        KLog.println("°C");
       }
     }
   }
@@ -2169,9 +2187,9 @@ void checkIgnitionProgress(unsigned long now) {
       mqttClient.publish(topic.c_str(), details, false);
     }
     
-    Serial.print("[Котел] Розжиг успешен! Температура повысилась на ");
-    Serial.print(tempIncrease);
-    Serial.println("°C");
+    KLog.print("[Котел] Розжиг успешен! Температура повысилась на ");
+    KLog.print(tempIncrease);
+    KLog.println("°C");
     return;
   }
   
@@ -2197,9 +2215,9 @@ void checkIgnitionProgress(unsigned long now) {
     
     applySystemEnable(false, "ignition_failed");
     
-    Serial.print("[Котел] Розжиг неудачен! Таймаут. Температура повысилась только на ");
-    Serial.print(tempIncrease);
-    Serial.println("°C");
+    KLog.print("[Котел] Розжиг неудачен! Таймаут. Температура повысилась только на ");
+    KLog.print(tempIncrease);
+    KLog.println("°C");
   }
 }
 
@@ -2213,13 +2231,13 @@ void setupNTP() {
   timeClient.setUpdateInterval(ntpSettings.updateInterval * 1000);  // Интервал обновления в миллисекундах
   timeClient.begin();
   
-  Serial.print("NTP клиент настроен: ");
-  Serial.print(ntpSettings.server);
-  Serial.print(", часовой пояс: UTC+");
-  Serial.println(ntpSettings.timezone);
+  KLog.print("NTP клиент настроен: ");
+  KLog.print(ntpSettings.server);
+  KLog.print(", часовой пояс: UTC+");
+  KLog.println(ntpSettings.timezone);
   
   // Первая синхронизация (может занять несколько секунд)
-  Serial.println("Синхронизация времени с NTP сервером...");
+  KLog.println("Синхронизация времени с NTP сервером...");
   int attempts = 0;
   unsigned long lastCheckTime = millis();
   while (!timeClient.update() && attempts < 10) {
@@ -2228,23 +2246,23 @@ void setupNTP() {
     if (now - lastCheckTime >= 500 || now < lastCheckTime) {
       lastCheckTime = now;
       attempts++;
-      Serial.print(".");
+      KLog.print(".");
     }
     yield(); // Позволяем другим задачам выполняться
   }
   
   if (timeClient.update()) {
-    Serial.println("\nВремя синхронизировано!");
-    Serial.print("Текущее время: ");
+    KLog.println("\nВремя синхронизировано!");
+    KLog.print("Текущее время: ");
     // Используем прямое форматирование здесь
     unsigned long epochTime = timeClient.getEpochTime();
     time_t rawTime = epochTime;
     struct tm *timeInfo = localtime(&rawTime);
     char timeStr[9];
     sprintf(timeStr, "%02d:%02d:%02d", timeInfo->tm_hour, timeInfo->tm_min, timeInfo->tm_sec);
-    Serial.println(timeStr);
+    KLog.println(timeStr);
   } else {
-    Serial.println("\nОшибка синхронизации времени");
+    KLog.println("\nОшибка синхронизации времени");
   }
 }
 
@@ -2309,8 +2327,8 @@ void publishSystemEnabledMqtt() {
   String systemTopic = mqttSettings.prefix + "/system";
   mqttClient.publish(systemTopic.c_str(), payload, true);
   systemEnabledMqttPending = false;
-  Serial.print("[MQTT] systemEnabled published: ");
-  Serial.println(payload);
+  KLog.print("[MQTT] systemEnabled published: ");
+  KLog.println(payload);
 }
 
 // Отложенная публикация: PubSubClient нельзя надёжно publish() из mqttCallback
@@ -2343,8 +2361,8 @@ void startPumpCoast(const char* reason) {
   pumpStableSince = 0;
   // Safety: принудительно включаем нужные насосы (оба, если контуры выкл)
   applyPumpCircuitOutputs(true, true);
-  Serial.print("[Насос] Выбег/защита: ");
-  Serial.println(reason ? reason : "start");
+  KLog.print("[Насос] Выбег/защита: ");
+  KLog.println(reason ? reason : "start");
 }
 
 // Sticky soft-stop / extinguish states that block normal operation
@@ -2369,11 +2387,11 @@ bool clearSoftStopFaults(const char* source) {
   heatingStartTime = 0;
   coalFeedingActive = false;
   systemState = "IDLE";
-  Serial.print("[Система] Сброс soft-stop ");
-  Serial.print(prev);
-  Serial.print(" (");
-  Serial.print(source ? source : "?");
-  Serial.println(")");
+  KLog.print("[Система] Сброс soft-stop ");
+  KLog.print(prev);
+  KLog.print(" (");
+  KLog.print(source ? source : "?");
+  KLog.println(")");
   return true;
 }
 
@@ -2394,16 +2412,16 @@ void applySystemEnable(bool enable, const char* source) {
       char details[48];
       snprintf(details, sizeof(details), "on via %s (soft-stop clear)", src);
       logEvent("SYSTEM_ENABLE", details);
-      Serial.print("[Система] Включена после soft-stop (");
-      Serial.print(src);
-      Serial.println(") → обычная логика вентилятора");
+      KLog.print("[Система] Включена после soft-stop (");
+      KLog.print(src);
+      KLog.println(") → обычная логика вентилятора");
       return;
     }
 
     if (boilerExtinguished || systemState == "КОТЕЛ_ПОГАС" || systemState == "ОШИБКА_РОЗЖИГА") {
-      Serial.print("[Система] Вкл (");
-      Serial.print(src);
-      Serial.println(") при погасании → розжиг");
+      KLog.print("[Система] Вкл (");
+      KLog.print(src);
+      KLog.println(") при погасании → розжиг");
       startIgnition();
       char details[48];
       snprintf(details, sizeof(details), "on via %s (ignition)", src);
@@ -2421,9 +2439,9 @@ void applySystemEnable(bool enable, const char* source) {
     char details[40];
     snprintf(details, sizeof(details), "on via %s", src);
     logEvent("SYSTEM_ENABLE", details);
-    Serial.print("[Система] Включена (");
-    Serial.print(src);
-    Serial.println(")");
+    KLog.print("[Система] Включена (");
+    KLog.print(src);
+    KLog.println(")");
     return;
   }
   
@@ -2469,10 +2487,10 @@ void applySystemEnable(bool enable, const char* source) {
     snprintf(details, sizeof(details), "off via %s", src);
     logEvent("SYSTEM_DISABLE", details);
   }
-  Serial.print("[Система] Выключена (");
-  Serial.print(src);
-  Serial.print("), выбег насоса: ");
-  Serial.println(pumpCoastActive ? "да" : "нет");
+  KLog.print("[Система] Выключена (");
+  KLog.print(src);
+  KLog.print("), выбег насоса: ");
+  KLog.println(pumpCoastActive ? "да" : "нет");
 }
 
 // Логика насоса: обычный режим + выбег после выкл + защита при росте подачи + контуры
@@ -2578,7 +2596,7 @@ void updatePumpLogic(unsigned long now) {
     if (coastElapsed >= PUMP_COAST_MAX_MS && !riseGuard && !outdoorTempBelowZero) {
       pumpCoastActive = false;
       pumpStableSince = 0;
-      Serial.println("[Насос] Выбег: достигнут максимум, останавливаем");
+      KLog.println("[Насос] Выбег: достигнут максимум, останавливаем");
     } else {
       shouldPumpRun = true;
       
@@ -2595,7 +2613,7 @@ void updatePumpLogic(unsigned long now) {
             if (!outdoorTempBelowZero && !riseGuard) {
               shouldPumpRun = false;
             }
-            Serial.println("[Насос] Выбег: подача стабильна, останавливаем");
+            KLog.println("[Насос] Выбег: подача стабильна, останавливаем");
           }
         }
       } else if (supplyTrend != 0) {
@@ -2652,13 +2670,13 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     message.trim();
     if (message == "online") {
       homeTempSensorLWTOnline = true;
-      Serial.println("[MQTT] Home temperature sensor LWT: online");
+      KLog.println("[MQTT] Home temperature sensor LWT: online");
     } else if (message == "offline") {
       homeTempSensorLWTOnline = false;
-      Serial.println("[MQTT] Home temperature sensor LWT: offline");
+      KLog.println("[MQTT] Home temperature sensor LWT: offline");
       // Если режим Комфорт и датчик стал offline, переключаемся на Авто и сохраняем
       if (workMode == 1) {
-        Serial.println("[MQTT] Switching from Comfort to Auto mode due to sensor offline");
+        KLog.println("[MQTT] Switching from Comfort to Auto mode due to sensor offline");
         workMode = 0;
         comfortState = "WAIT";
         comfortStateStartTime = 0;
@@ -2677,14 +2695,14 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       digitalWrite(PIN_RELAY_SENSORS, sensorsLevel);
       sensorsResetPending = true;
       sensorsResetStartTime = millis();
-      Serial.println("[MQTT] Sensors reset command received");
+      KLog.println("[MQTT] Sensors reset command received");
     } else if (message == "0" || message == "off") {
       // Выключаем реле
       sensorsRelayState = false;
       int sensorsLevel = relaySettings.sensorsOffIsLow ? LOW : HIGH;
       digitalWrite(PIN_RELAY_SENSORS, sensorsLevel);
       sensorsResetPending = false;
-      Serial.println("[MQTT] Sensors relay off command received");
+      KLog.println("[MQTT] Sensors relay off command received");
     }
   }
   
@@ -2695,7 +2713,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     message.trim();
     if (message == "1" || message == "on" || message == "start") {
       startIgnition();
-      Serial.println("[MQTT] Ignition start command received");
+      KLog.println("[MQTT] Ignition start command received");
     }
   }
   
@@ -2708,11 +2726,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     bool enable = false;
     if (parseMqttOnOff(message, enable)) {
       applySystemEnable(enable, "mqtt");
-      Serial.print("[MQTT] System ");
-      Serial.println(enable ? "ON" : "OFF");
+      KLog.print("[MQTT] System ");
+      KLog.println(enable ? "ON" : "OFF");
     } else {
-      Serial.print("[MQTT] System set: unknown payload: ");
-      Serial.println(message);
+      KLog.print("[MQTT] System set: unknown payload: ");
+      KLog.println(message);
     }
   }
 
@@ -2727,8 +2745,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       relaySettingsSavePending = true;
       circuitsMqttPending = true;
       applyPumpCircuitOutputs(pumpState || pump2State || pumpCoastActive, false);
-      Serial.print("[MQTT] circuit1Enabled=");
-      Serial.println(enable ? "1" : "0");
+      KLog.print("[MQTT] circuit1Enabled=");
+      KLog.println(enable ? "1" : "0");
     }
   }
   if (topicStr == circuit2SetTopic) {
@@ -2738,8 +2756,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       relaySettingsSavePending = true;
       circuitsMqttPending = true;
       applyPumpCircuitOutputs(pumpState || pump2State || pumpCoastActive, false);
-      Serial.print("[MQTT] circuit2Enabled=");
-      Serial.println(enable ? "1" : "0");
+      KLog.print("[MQTT] circuit2Enabled=");
+      KLog.println(enable ? "1" : "0");
     }
   }
 }
@@ -2825,7 +2843,7 @@ bool mqttConnect() {
     // Проверка режима работы после подключения к MQTT
     // Если режим Комфорт, но датчик температуры дома недоступен, переключаемся на Авто
     if (workMode == 1 && !homeTempSensorLWTOnline) {
-      Serial.println("[MQTT] Work mode is Comfort, but home temp sensor is offline. Switching to Auto mode.");
+      KLog.println("[MQTT] Work mode is Comfort, but home temp sensor is offline. Switching to Auto mode.");
       workMode = 0;
       comfortState = "WAIT";
       comfortStateStartTime = 0;
@@ -3149,7 +3167,7 @@ void handleEncoderButton() {
           queueSystemEnabledMqtt();
         }
         logEvent("ENCODER", "long ignition");
-        Serial.println("[ENCODER] Long press detected - starting ignition");
+        KLog.println("[ENCODER] Long press detected - starting ignition");
       }
     }
   } 
@@ -3207,90 +3225,90 @@ void handleSerialCommands() {
     
     if (command == "1") {
       // Тест: поворот влево (уменьшение)
-      Serial.println("[ТЕСТ] Симуляция поворота влево");
+      KLog.println("[ТЕСТ] Симуляция поворота влево");
       encoderPosition--;
       lastEncoderRotation = millis(); // Сбрасываем время поворота для теста
-      Serial.print("[ТЕСТ] encoderPosition = ");
-      Serial.println(encoderPosition);
+      KLog.print("[ТЕСТ] encoderPosition = ");
+      KLog.println(encoderPosition);
       handleEncoderRotation(); // Обрабатываем изменение
     }
     else if (command == "2") {
       // Тест: поворот вправо (увеличение)
-      Serial.println("[ТЕСТ] Симуляция поворота вправо");
+      KLog.println("[ТЕСТ] Симуляция поворота вправо");
       encoderPosition++;
       lastEncoderRotation = millis(); // Сбрасываем время поворота для теста
-      Serial.print("[ТЕСТ] encoderPosition = ");
-      Serial.println(encoderPosition);
+      KLog.print("[ТЕСТ] encoderPosition = ");
+      KLog.println(encoderPosition);
       handleEncoderRotation(); // Обрабатываем изменение
     }
     else if (command == "3") {
       // Тест: нажатие кнопки
-      Serial.println("[ТЕСТ] Симуляция нажатия кнопки");
-      Serial.print("[ТЕСТ] Текущее состояние подброса: ");
-      Serial.println(coalFeedingActive ? "АКТИВЕН" : "ВЫКЛ");
-      Serial.println("[ТЕСТ] Переключение подброса угля...");
+      KLog.println("[ТЕСТ] Симуляция нажатия кнопки");
+      KLog.print("[ТЕСТ] Текущее состояние подброса: ");
+      KLog.println(coalFeedingActive ? "АКТИВЕН" : "ВЫКЛ");
+      KLog.println("[ТЕСТ] Переключение подброса угля...");
       if (!coalFeedingActive) {
         startCoalFeeding();
-        Serial.println("[ТЕСТ] ✓ Подброс угля АКТИВИРОВАН");
+        KLog.println("[ТЕСТ] ✓ Подброс угля АКТИВИРОВАН");
       } else {
         stopCoalFeeding();
-        Serial.println("[ТЕСТ] ✓ Подброс угля ОСТАНОВЛЕН");
+        KLog.println("[ТЕСТ] ✓ Подброс угля ОСТАНОВЛЕН");
       }
     }
     else if (command == "s" || command == "status") {
       // Показать статус энкодера
-      Serial.println("\n=== СТАТУС ЭНКОДЕРА ===");
-      Serial.print("encoderPosition: ");
-      Serial.println(encoderPosition);
-      Serial.print("lastEncoderPosition: ");
-      Serial.println(lastEncoderPosition);
-      Serial.print("lastEncoderChange: ");
-      Serial.print(millis() - lastEncoderChange);
-      Serial.println(" мс назад");
-      Serial.print("lastEncoderRotation: ");
-      Serial.print(millis() - lastEncoderRotation);
-      Serial.println(" мс назад");
-      Serial.print("lastEncoderISRTime: ");
-      Serial.print(millis() - lastEncoderISRTime);
-      Serial.println(" мс назад");
-      Serial.print("encoderISRCount (всего прерываний): ");
-      Serial.println(encoderISRCount);
-      Serial.print("lastEncoderState (бинарный): ");
-      Serial.println(lastEncoderState, BIN);
-      Serial.print("Уставка: ");
-      Serial.print(setpoint, 1);
-      Serial.println("°C");
-      Serial.print("Состояние кнопки (GPIO ");
-      Serial.print(PIN_ENCODER_SW);
-      Serial.print("): ");
+      KLog.println("\n=== СТАТУС ЭНКОДЕРА ===");
+      KLog.print("encoderPosition: ");
+      KLog.println(encoderPosition);
+      KLog.print("lastEncoderPosition: ");
+      KLog.println(lastEncoderPosition);
+      KLog.print("lastEncoderChange: ");
+      KLog.print(millis() - lastEncoderChange);
+      KLog.println(" мс назад");
+      KLog.print("lastEncoderRotation: ");
+      KLog.print(millis() - lastEncoderRotation);
+      KLog.println(" мс назад");
+      KLog.print("lastEncoderISRTime: ");
+      KLog.print(millis() - lastEncoderISRTime);
+      KLog.println(" мс назад");
+      KLog.print("encoderISRCount (всего прерываний): ");
+      KLog.println(encoderISRCount);
+      KLog.print("lastEncoderState (бинарный): ");
+      KLog.println(lastEncoderState, BIN);
+      KLog.print("Уставка: ");
+      KLog.print(setpoint, 1);
+      KLog.println("°C");
+      KLog.print("Состояние кнопки (GPIO ");
+      KLog.print(PIN_ENCODER_SW);
+      KLog.print("): ");
       bool btnState = digitalRead(PIN_ENCODER_SW);
-      Serial.println(btnState == LOW ? "НАЖАТА" : "ОТПУЩЕНА");
-      Serial.print("Состояние CLK (GPIO ");
-      Serial.print(PIN_ENCODER_CLK);
-      Serial.print("): ");
-      Serial.println(digitalRead(PIN_ENCODER_CLK));
-      Serial.print("Состояние DT (GPIO ");
-      Serial.print(PIN_ENCODER_DT);
-      Serial.print("): ");
-      Serial.println(digitalRead(PIN_ENCODER_DT));
-      Serial.print("Подброс угля: ");
-      Serial.println(coalFeedingActive ? "АКТИВЕН" : "ВЫКЛ");
-      Serial.println("=====================\n");
+      KLog.println(btnState == LOW ? "НАЖАТА" : "ОТПУЩЕНА");
+      KLog.print("Состояние CLK (GPIO ");
+      KLog.print(PIN_ENCODER_CLK);
+      KLog.print("): ");
+      KLog.println(digitalRead(PIN_ENCODER_CLK));
+      KLog.print("Состояние DT (GPIO ");
+      KLog.print(PIN_ENCODER_DT);
+      KLog.print("): ");
+      KLog.println(digitalRead(PIN_ENCODER_DT));
+      KLog.print("Подброс угля: ");
+      KLog.println(coalFeedingActive ? "АКТИВЕН" : "ВЫКЛ");
+      KLog.println("=====================\n");
     }
     else if (command == "h" || command == "help" || command == "?") {
       // Справка
-      Serial.println("\n=== КОМАНДЫ ОТЛАДКИ ЭНКОДЕРА ===");
-      Serial.println("1 - Тест: поворот влево (уменьшение уставки)");
-      Serial.println("2 - Тест: поворот вправо (увеличение уставки)");
-      Serial.println("3 - Тест: нажатие кнопки (переключение подброса)");
-      Serial.println("s - Показать статус энкодера");
-      Serial.println("h - Показать эту справку");
-      Serial.println("===============================\n");
+      KLog.println("\n=== КОМАНДЫ ОТЛАДКИ ЭНКОДЕРА ===");
+      KLog.println("1 - Тест: поворот влево (уменьшение уставки)");
+      KLog.println("2 - Тест: поворот вправо (увеличение уставки)");
+      KLog.println("3 - Тест: нажатие кнопки (переключение подброса)");
+      KLog.println("s - Показать статус энкодера");
+      KLog.println("h - Показать эту справку");
+      KLog.println("===============================\n");
     }
     else if (command.length() > 0) {
-      Serial.print("[ОШИБКА] Неизвестная команда: ");
-      Serial.println(command);
-      Serial.println("Введите 'h' для справки");
+      KLog.print("[ОШИБКА] Неизвестная команда: ");
+      KLog.println(command);
+      KLog.println("Введите 'h' для справки");
     }
   }
 }
@@ -3406,15 +3424,15 @@ void syncRelays() {
     if (elapsed > MANUAL_CONTROL_TIMEOUT) {
       if (manualFanControl) {
         manualFanControl = false;
-        Serial.println("[Реле] Ручное управление вентилятором отключено (таймаут 2 мин)");
+        KLog.println("[Реле] Ручное управление вентилятором отключено (таймаут 2 мин)");
       }
       if (manualPumpControl) {
         manualPumpControl = false;
-        Serial.println("[Реле] Ручное управление насосом 1 отключено (таймаут 2 мин)");
+        KLog.println("[Реле] Ручное управление насосом 1 отключено (таймаут 2 мин)");
       }
       if (manualPump2Control) {
         manualPump2Control = false;
-        Serial.println("[Реле] Ручное управление насосом 2 отключено (таймаут 2 мин)");
+        KLog.println("[Реле] Ручное управление насосом 2 отключено (таймаут 2 мин)");
       }
       lastManualControlTime = 0;
     }
@@ -3424,7 +3442,7 @@ void syncRelays() {
   if (manualFanControl && fanState && isSupplyTempValid()) {
     float ohLimit = (workMode == 1) ? comfortSettings.warningTemp : autoSettings.overheatTemp;
     if (supplyTemp >= ohLimit) {
-      Serial.println("[Безопасность] Ручной вентилятор принудительно ВЫКЛ (перегрев)");
+      KLog.println("[Безопасность] Ручной вентилятор принудительно ВЫКЛ (перегрев)");
       setFanDesired(false);
       manualFanControl = false;
     }
@@ -3552,7 +3570,7 @@ bool isHomeTempSensorValid(unsigned long now) {
 void handleComfortMode(unsigned long now) {
   // Проверка наличия температуры в доме - если датчик offline, переключаемся на режим Авто
   if (!isHomeTempSensorValid(now)) {
-    Serial.println("[Comfort] Home temperature sensor offline, switching to Auto mode");
+    KLog.println("[Comfort] Home temperature sensor offline, switching to Auto mode");
     workMode = 0;
     saveWorkModeToEEPROM();
     comfortState = "WAIT";
@@ -3585,7 +3603,7 @@ void handleComfortMode(unsigned long now) {
     comfortState = "WAIT";
     comfortStateStartTime = now;
     systemState = "Ожидание";
-    Serial.println("[Comfort] Восстановление после перегрева");
+    KLog.println("[Comfort] Восстановление после перегрева");
   }
   
   unsigned long stateElapsed = (comfortStateStartTime == 0) ? 0 : 
@@ -3734,8 +3752,8 @@ void handleSpiffsIndexUpload() {
     spiffsUploadPath = name.endsWith(".gz") ? "/index.html.gz" : "/index.html";
     SPIFFS.remove(spiffsUploadPath);
     spiffsUploadFile = SPIFFS.open(spiffsUploadPath, "w");
-    Serial.print("[FS] Upload start: ");
-    Serial.println(spiffsUploadPath);
+    KLog.print("[FS] Upload start: ");
+    KLog.println(spiffsUploadPath);
   } else if (upload.status == UPLOAD_FILE_WRITE) {
     if (spiffsUploadFile) {
       spiffsUploadFile.write(upload.buf, upload.currentSize);
@@ -3744,8 +3762,8 @@ void handleSpiffsIndexUpload() {
     if (spiffsUploadFile) {
       spiffsUploadFile.close();
     }
-    Serial.print("[FS] Upload end bytes=");
-    Serial.println(upload.totalSize);
+    KLog.print("[FS] Upload end bytes=");
+    KLog.println(upload.totalSize);
   }
 }
 
@@ -4098,13 +4116,13 @@ void handleControl() {
       if (manual) {
         manualFanControl = true;
         lastManualControlTime = millis();
-        Serial.print("[Инженерное] Вентилятор: ");
+        KLog.print("[Инженерное] Вентилятор: ");
       } else {
         manualFanControl = false;
-        Serial.print("Вентилятор: ");
+        KLog.print("Вентилятор: ");
       }
-      Serial.print(state ? "ВКЛ" : "ВЫКЛ");
-      Serial.println();
+      KLog.print(state ? "ВКЛ" : "ВЫКЛ");
+      KLog.println();
     } else if (device == "pump") {
       if (manual) {
         manualPumpControl = true;
@@ -4112,13 +4130,13 @@ void handleControl() {
         pumpState = state;
         int pumpLevel = state ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
         digitalWrite(PIN_RELAY_PUMP, pumpLevel);
-        Serial.print("[Инженерное] Насос1: ");
+        KLog.print("[Инженерное] Насос1: ");
       } else {
         manualPumpControl = false;
         setPumpDesired(state);
-        Serial.print("Насос1: ");
+        KLog.print("Насос1: ");
       }
-      Serial.println(state ? "ВКЛ" : "ВЫКЛ");
+      KLog.println(state ? "ВКЛ" : "ВЫКЛ");
     } else if (device == "pump2") {
       if (manual) {
         manualPump2Control = true;
@@ -4126,28 +4144,28 @@ void handleControl() {
         pump2State = state;
         int pump2Level = state ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
         digitalWrite(PIN_RELAY_PUMP2, pump2Level);
-        Serial.print("[Инженерное] Насос2: ");
+        KLog.print("[Инженерное] Насос2: ");
       } else {
         manualPump2Control = false;
         setPump2Desired(state);
-        Serial.print("Насос2: ");
+        KLog.print("Насос2: ");
       }
-      Serial.println(state ? "ВКЛ" : "ВЫКЛ");
+      KLog.println(state ? "ВКЛ" : "ВЫКЛ");
     } else if (device == "sensors") {
       sensorsRelayState = state;
       // Управление реле датчиков с учетом логики (обратная логика вентилятора)
       int sensorsLevel = state ? HIGH : (relaySettings.sensorsOffIsLow ? LOW : HIGH);
       digitalWrite(PIN_RELAY_SENSORS, sensorsLevel);
-      Serial.print("[Реле датчиков] ");
-      Serial.print(state ? "ВКЛ (HIGH)" : "ВЫКЛ (");
-      Serial.print(relaySettings.sensorsOffIsLow ? "LOW" : "HIGH");
-      Serial.println(")");
+      KLog.print("[Реле датчиков] ");
+      KLog.print(state ? "ВКЛ (HIGH)" : "ВЫКЛ (");
+      KLog.print(relaySettings.sensorsOffIsLow ? "LOW" : "HIGH");
+      KLog.println(")");
       
       // Если выключили реле датчиков, планируем автоматическое включение через 500мс для сброса ошибки
       if (!state) {
         sensorsResetPending = true;
         sensorsResetStartTime = millis();
-        Serial.println("[Реле датчиков] Запланирован сброс через 500мс");
+        KLog.println("[Реле датчиков] Запланирован сброс через 500мс");
       }
     } else {
       server.send(400, "application/json", "{\"error\":\"Unknown device\"}");
@@ -4196,53 +4214,53 @@ void handleRelaySettingsGet() {
 void handleRelaySettingsPost() {
   if (server.hasArg("plain")) {
     String plainData = server.arg("plain");
-    Serial.print("[Реле] Получены данные: ");
-    Serial.println(plainData);
+    KLog.print("[Реле] Получены данные: ");
+    KLog.println(plainData);
     
     DynamicJsonDocument doc(256);
     DeserializationError error = deserializeJson(doc, plainData);
     
     if (error) {
-      Serial.print("[Реле] Ошибка парсинга JSON: ");
-      Serial.println(error.c_str());
+      KLog.print("[Реле] Ошибка парсинга JSON: ");
+      KLog.println(error.c_str());
       server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
       return;
     }
     
-    Serial.print("[Реле] Текущие настройки: fanOffIsLow=");
-    Serial.print(relaySettings.fanOffIsLow ? "true" : "false");
-    Serial.print(", pumpOffIsLow=");
-    Serial.println(relaySettings.pumpOffIsLow ? "true" : "false");
+    KLog.print("[Реле] Текущие настройки: fanOffIsLow=");
+    KLog.print(relaySettings.fanOffIsLow ? "true" : "false");
+    KLog.print(", pumpOffIsLow=");
+    KLog.println(relaySettings.pumpOffIsLow ? "true" : "false");
     
     bool changed = false;
     if (doc.containsKey("fanOffIsLow")) {
       bool newValue = doc["fanOffIsLow"].as<bool>();
-      Serial.print("[Реле] Новое значение fanOffIsLow: ");
-      Serial.println(newValue ? "true" : "false");
+      KLog.print("[Реле] Новое значение fanOffIsLow: ");
+      KLog.println(newValue ? "true" : "false");
       if (relaySettings.fanOffIsLow != newValue) {
         relaySettings.fanOffIsLow = newValue;
         changed = true;
-        Serial.println("[Реле] ✓ fanOffIsLow изменено");
+        KLog.println("[Реле] ✓ fanOffIsLow изменено");
       }
     }
     if (doc.containsKey("pumpOffIsLow")) {
       bool newValue = doc["pumpOffIsLow"].as<bool>();
-      Serial.print("[Реле] Новое значение pumpOffIsLow: ");
-      Serial.println(newValue ? "true" : "false");
+      KLog.print("[Реле] Новое значение pumpOffIsLow: ");
+      KLog.println(newValue ? "true" : "false");
       if (relaySettings.pumpOffIsLow != newValue) {
         relaySettings.pumpOffIsLow = newValue;
         changed = true;
-        Serial.println("[Реле] ✓ pumpOffIsLow изменено");
+        KLog.println("[Реле] ✓ pumpOffIsLow изменено");
       }
     }
     if (doc.containsKey("sensorsOffIsLow")) {
       bool newValue = doc["sensorsOffIsLow"].as<bool>();
-      Serial.print("[Реле] Новое значение sensorsOffIsLow: ");
-      Serial.println(newValue ? "true" : "false");
+      KLog.print("[Реле] Новое значение sensorsOffIsLow: ");
+      KLog.println(newValue ? "true" : "false");
       if (relaySettings.sensorsOffIsLow != newValue) {
         relaySettings.sensorsOffIsLow = newValue;
         changed = true;
-        Serial.println("[Реле] ✓ sensorsOffIsLow изменено");
+        KLog.println("[Реле] ✓ sensorsOffIsLow изменено");
       }
     }
     if (doc.containsKey("circuit1Enabled")) {
@@ -4256,7 +4274,7 @@ void handleRelaySettingsPost() {
     
     // Сохраняем всегда, даже если значения не изменились (для надежности)
     saveRelaySettingsToEEPROM();
-    Serial.println("[Реле] Настройки сохранены в EEPROM");
+    KLog.println("[Реле] Настройки сохранены в EEPROM");
     // Применяем контуры к насосам, затем синхронизируем GPIO
     applyPumpCircuitOutputs(pumpState || pump2State || pumpCoastActive, false);
     syncRelays();
@@ -4270,11 +4288,11 @@ void handleRelaySettingsPost() {
     responseDoc["circuit2Enabled"] = circuit2Enabled;
     String response;
     serializeJson(responseDoc, response);
-    Serial.print("[Реле] Отправка ответа: ");
-    Serial.println(response);
+    KLog.print("[Реле] Отправка ответа: ");
+    KLog.println(response);
     server.send(200, "application/json", response);
   } else {
-    Serial.println("[Реле] POST запрос без данных");
+    KLog.println("[Реле] POST запрос без данных");
     server.send(400, "application/json", "{\"error\":\"No data\"}");
   }
 }
@@ -4365,7 +4383,7 @@ void handleAutoSettingsPost() {
         // Уставка изменилась - сбрасываем таймеры переключения вентилятора
         lastFanToggleTime = 0;
         lastFanToggleTemp = supplyTemp;
-        Serial.println("[Auto] Setpoint changed - resetting fan toggle timers");
+        KLog.println("[Auto] Setpoint changed - resetting fan toggle timers");
         char det[24];
         snprintf(det, sizeof(det), "Уставка %.1f°C настройки", newSetpoint);
         logEvent("SETPOINT", det);
@@ -4662,12 +4680,12 @@ void resetAllTimers() {
   sensorsResetPending = false;
   sensorsAutoResetInProgress = false;
   systemState = "IDLE";
-  Serial.println("[TIMERS] Все таймеры сброшены");
+  KLog.println("[TIMERS] Все таймеры сброшены");
 }
 
 // Функция определения состояния системы при запуске
 void determineSystemStateOnStartup() {
-  Serial.println("[STARTUP] Определение состояния системы...");
+  KLog.println("[STARTUP] Определение состояния системы...");
 
   // После сброса питания всегда рабочий режим (не оставляем sticky OFF после COAL_BURNED)
   systemEnabled = true;
@@ -4715,12 +4733,12 @@ void determineSystemStateOnStartup() {
     // Устанавливаем таймер с текущего времени
     fanStartTime = now;
     heatingStartTime = now;
-    Serial.println("[STARTUP] Вентилятор включен - устанавливаем таймеры");
+    KLog.println("[STARTUP] Вентилятор включен - устанавливаем таймеры");
   }
   
   if (pumpState && lastPumpRunTime == 0) {
     lastPumpRunTime = now;
-    Serial.println("[STARTUP] Насос включен - устанавливаем таймер");
+    KLog.println("[STARTUP] Насос включен - устанавливаем таймер");
   }
   
   // Устанавливаем начальное состояние, если оно не определено
@@ -4732,14 +4750,14 @@ void determineSystemStateOnStartup() {
     }
   }
   
-  Serial.print("[STARTUP] Текущее состояние: ");
-  Serial.println(systemState);
-  Serial.print("[STARTUP] Система включена: ");
-  Serial.println(systemEnabled ? "Да" : "Нет");
-  Serial.print("[STARTUP] Вентилятор: ");
-  Serial.println(fanState ? "Включен" : "Выключен");
-  Serial.print("[STARTUP] Насос: ");
-  Serial.println(pumpState ? "Включен" : "Выключен");
+  KLog.print("[STARTUP] Текущее состояние: ");
+  KLog.println(systemState);
+  KLog.print("[STARTUP] Система включена: ");
+  KLog.println(systemEnabled ? "Да" : "Нет");
+  KLog.print("[STARTUP] Вентилятор: ");
+  KLog.println(fanState ? "Включен" : "Выключен");
+  KLog.print("[STARTUP] Насос: ");
+  KLog.println(pumpState ? "Включен" : "Выключен");
 }
 
 // API: Управление системой (включение/выключение)
@@ -4785,7 +4803,7 @@ void handleSystemReset() {
   fanStartTime = 0;
   maxTempDuringFan = 0.0;
   
-  Serial.println("[API] Сброс состояния системы выполнен");
+  KLog.println("[API] Сброс состояния системы выполнен");
   logEvent("SYSTEM_RESET", "web");
   
   DynamicJsonDocument doc(200);
@@ -5009,7 +5027,7 @@ void handleWiFiReset() {
 
 // API: Сканирование датчиков (обе шины)
 void handleSensorsScan() {
-  Serial.println("Сканирование датчиков DS18B20 на обеих шинах...");
+  KLog.println("Сканирование датчиков DS18B20 на обеих шинах...");
   
   DynamicJsonDocument doc(2048);
   JsonArray sensorsArray = doc.createNestedArray("sensors");
@@ -5017,11 +5035,11 @@ void handleSensorsScan() {
   int totalCount = 0;
   
   // Сканирование первой шины (GPIO 4: Подача, Обратка)
-  Serial.println("Шина 1 (GPIO 4):");
+  KLog.println("Шина 1 (GPIO 4):");
   sensors1.begin();
   int deviceCount1 = sensors1.getDeviceCount();
-  Serial.print("Найдено датчиков на шине 1: ");
-  Serial.println(deviceCount1);
+  KLog.print("Найдено датчиков на шине 1: ");
+  KLog.println(deviceCount1);
   
   if (deviceCount1 > 0) {
     DeviceAddress deviceAddress;
@@ -5047,24 +5065,24 @@ void handleSensorsScan() {
           sensor["temperature"] = temp;
         }
         
-        Serial.print("  Датчик ");
-        Serial.print(i);
-        Serial.print(": ");
-        Serial.print(addressStr);
-        Serial.print(" = ");
-        Serial.print(temp);
-        Serial.println("°C");
+        KLog.print("  Датчик ");
+        KLog.print(i);
+        KLog.print(": ");
+        KLog.print(addressStr);
+        KLog.print(" = ");
+        KLog.print(temp);
+        KLog.println("°C");
         totalCount++;
       }
     }
   }
   
   // Сканирование второй шины (GPIO 5: Котельная, Улица)
-  Serial.println("Шина 2 (GPIO 5):");
+  KLog.println("Шина 2 (GPIO 5):");
   sensors2.begin();
   int deviceCount2 = sensors2.getDeviceCount();
-  Serial.print("Найдено датчиков на шине 2: ");
-  Serial.println(deviceCount2);
+  KLog.print("Найдено датчиков на шине 2: ");
+  KLog.println(deviceCount2);
   
   if (deviceCount2 > 0) {
     DeviceAddress deviceAddress;
@@ -5090,20 +5108,20 @@ void handleSensorsScan() {
           sensor["temperature"] = temp;
         }
         
-        Serial.print("  Датчик ");
-        Serial.print(i);
-        Serial.print(": ");
-        Serial.print(addressStr);
-        Serial.print(" = ");
-        Serial.print(temp);
-        Serial.println("°C");
+        KLog.print("  Датчик ");
+        KLog.print(i);
+        KLog.print(": ");
+        KLog.print(addressStr);
+        KLog.print(" = ");
+        KLog.print(temp);
+        KLog.println("°C");
         totalCount++;
       }
     }
   }
   
-  Serial.print("Всего найдено датчиков: ");
-  Serial.println(totalCount);
+  KLog.print("Всего найдено датчиков: ");
+  KLog.println(totalCount);
   
   doc["count"] = totalCount;
   doc["countBus1"] = deviceCount1;
@@ -5150,22 +5168,22 @@ void handleSensorsMappingPost() {
     if (sensorMapping.supply != oldSupply) {
       lastValidSupplyTempTime = 0;
       supplyTemp = 0.0;
-      Serial.println("[Привязка датчиков] Сброшен датчик подачи");
+      KLog.println("[Привязка датчиков] Сброшен датчик подачи");
     }
     if (sensorMapping.return_sensor != oldReturn) {
       lastValidReturnTempTime = 0;
       returnTemp = 0.0;
-      Serial.println("[Привязка датчиков] Сброшен датчик обратки");
+      KLog.println("[Привязка датчиков] Сброшен датчик обратки");
     }
     if (sensorMapping.boiler != oldBoiler) {
       lastValidBoilerTempTime = 0;
       boilerTemp = 0.0;
-      Serial.println("[Привязка датчиков] Сброшен датчик котельной");
+      KLog.println("[Привязка датчиков] Сброшен датчик котельной");
     }
     if (sensorMapping.outside != oldOutside) {
       lastValidOutdoorTempTime = 0;
       outdoorTemp = 0.0;
-      Serial.println("[Привязка датчиков] Сброшен датчик улицы");
+      KLog.println("[Привязка датчиков] Сброшен датчик улицы");
     }
     
     saveSensorMappingToEEPROM();
@@ -5201,7 +5219,7 @@ void saveUpdateSettingsToEEPROM() {
   }
   EEPROM.commit();
   EEPROM.end();
-  Serial.println("Update settings saved to EEPROM");
+  KLog.println("Update settings saved to EEPROM");
 }
 
 void loadUpdateSettingsFromEEPROM() {
@@ -5318,11 +5336,11 @@ void loadOtaResult() {
                   otaResult.fromVersion,
                   otaResult.toVersion,
                   "Прервано во время обновления");
-    Serial.println("[Update] PENDING → FAIL after reboot");
+    KLog.println("[Update] PENDING → FAIL after reboot");
   }
 
-  Serial.print("[Update] Loaded OTA result status=");
-  Serial.println(otaResult.status);
+  KLog.print("[Update] Loaded OTA result status=");
+  KLog.println(otaResult.status);
 }
 
 void clearOtaResult() {
@@ -5350,16 +5368,16 @@ void handleUpdateAck() {
 String checkForUpdates() {
   // Проверяем WiFi соединение
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[Update] ERROR: WiFi not connected!");
-    Serial.print("[Update] WiFi status: ");
-    Serial.println(WiFi.status());
+    KLog.println("[Update] ERROR: WiFi not connected!");
+    KLog.print("[Update] WiFi status: ");
+    KLog.println(WiFi.status());
     return "";
   }
   
-  Serial.print("[Update] WiFi connected. IP: ");
-  Serial.println(WiFi.localIP());
-  Serial.print("[Update] Checking for updates from: ");
-  Serial.println(GITHUB_VERSION_URL);
+  KLog.print("[Update] WiFi connected. IP: ");
+  KLog.println(WiFi.localIP());
+  KLog.print("[Update] Checking for updates from: ");
+  KLog.println(GITHUB_VERSION_URL);
   
   WiFiClientSecure client;
   HTTPClient http;
@@ -5369,115 +5387,115 @@ String checkForUpdates() {
   client.setTimeout(20000);  // 20 секунд таймаут
   
   // Пробуем подключиться
-  Serial.println("[Update] Initializing HTTP client...");
+  KLog.println("[Update] Initializing HTTP client...");
   bool beginResult = http.begin(client, GITHUB_VERSION_URL);
   
   if (!beginResult) {
-    Serial.println("[Update] ERROR: http.begin() returned false");
-    Serial.println("[Update] Possible causes:");
-    Serial.println("[Update]   - DNS resolution failed");
-    Serial.println("[Update]   - Invalid URL");
-    Serial.println("[Update]   - Memory issue");
+    KLog.println("[Update] ERROR: http.begin() returned false");
+    KLog.println("[Update] Possible causes:");
+    KLog.println("[Update]   - DNS resolution failed");
+    KLog.println("[Update]   - Invalid URL");
+    KLog.println("[Update]   - Memory issue");
     return "";
   }
   
-  Serial.println("[Update] HTTP client initialized successfully");
+  KLog.println("[Update] HTTP client initialized successfully");
   
   http.setTimeout(20000);  // 20 секунд таймаут
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.addHeader("User-Agent", "ESP32-Kotel/1.0");
   http.addHeader("Accept", "text/plain");
   
-  Serial.println("[Update] Sending GET request...");
+  KLog.println("[Update] Sending GET request...");
   unsigned long startTime = millis();
   int httpCode = http.GET();
   unsigned long elapsed = millis() - startTime;
   
-  Serial.print("[Update] Request completed in ");
-  Serial.print(elapsed);
-  Serial.println(" ms");
-  Serial.print("[Update] HTTP response code: ");
-  Serial.println(httpCode);
+  KLog.print("[Update] Request completed in ");
+  KLog.print(elapsed);
+  KLog.println(" ms");
+  KLog.print("[Update] HTTP response code: ");
+  KLog.println(httpCode);
   
   if (httpCode == HTTP_CODE_OK) {
-    Serial.println("[Update] Reading response body...");
+    KLog.println("[Update] Reading response body...");
     String version = http.getString();
     version.trim();
     
-    Serial.print("[Update] Received version string (length=");
-    Serial.print(version.length());
-    Serial.print("): ");
-    Serial.println(version);
+    KLog.print("[Update] Received version string (length=");
+    KLog.print(version.length());
+    KLog.print("): ");
+    KLog.println(version);
     
     // Проверяем, что версия не пустая
     if (version.length() == 0) {
-      Serial.println("[Update] WARNING: Received empty version string");
+      KLog.println("[Update] WARNING: Received empty version string");
       http.end();
       return "";
     }
     
     // Проверяем формат версии (должен быть типа "4.2.1")
     if (version.indexOf('.') == -1) {
-      Serial.println("[Update] WARNING: Version format seems invalid");
+      KLog.println("[Update] WARNING: Version format seems invalid");
     }
     
     // Сравнение версий (простое строковое сравнение)
     if (version != String(FIRMWARE_VERSION)) {
-      Serial.print("[Update] ✓ New version available: ");
-      Serial.print(version);
-      Serial.print(" (current: ");
-      Serial.print(FIRMWARE_VERSION);
-      Serial.println(")");
+      KLog.print("[Update] ✓ New version available: ");
+      KLog.print(version);
+      KLog.print(" (current: ");
+      KLog.print(FIRMWARE_VERSION);
+      KLog.println(")");
       http.end();
       return version;  // Есть новая версия
     } else {
-      Serial.println("[Update] ✓ Already on latest version");
+      KLog.println("[Update] ✓ Already on latest version");
     }
   } else {
-    Serial.print("[Update] ✗ ERROR: HTTP code ");
-    Serial.println(httpCode);
+    KLog.print("[Update] ✗ ERROR: HTTP code ");
+    KLog.println(httpCode);
     
     if (httpCode < 0) {
-      Serial.print("[Update] Error code: ");
-      Serial.print(httpCode);
-      Serial.print(" - ");
+      KLog.print("[Update] Error code: ");
+      KLog.print(httpCode);
+      KLog.print(" - ");
       String errorStr = http.errorToString(httpCode);
-      Serial.println(errorStr);
+      KLog.println(errorStr);
       
       // Дополнительная диагностика для распространенных ошибок
       if (httpCode == HTTPC_ERROR_CONNECTION_REFUSED) {
-        Serial.println("[Update] Connection refused - server may be down");
+        KLog.println("[Update] Connection refused - server may be down");
       } else if (httpCode == HTTPC_ERROR_SEND_HEADER_FAILED) {
-        Serial.println("[Update] Failed to send header");
+        KLog.println("[Update] Failed to send header");
       } else if (httpCode == HTTPC_ERROR_SEND_PAYLOAD_FAILED) {
-        Serial.println("[Update] Failed to send payload");
+        KLog.println("[Update] Failed to send payload");
       } else if (httpCode == HTTPC_ERROR_NOT_CONNECTED) {
-        Serial.println("[Update] Not connected to server");
+        KLog.println("[Update] Not connected to server");
       } else if (httpCode == HTTPC_ERROR_CONNECTION_LOST) {
-        Serial.println("[Update] Connection lost");
+        KLog.println("[Update] Connection lost");
       } else if (httpCode == HTTPC_ERROR_NO_STREAM) {
-        Serial.println("[Update] No stream available");
+        KLog.println("[Update] No stream available");
       } else if (httpCode == HTTPC_ERROR_NO_HTTP_SERVER) {
-        Serial.println("[Update] No HTTP server");
+        KLog.println("[Update] No HTTP server");
       } else if (httpCode == HTTPC_ERROR_TOO_LESS_RAM) {
-        Serial.println("[Update] Not enough RAM");
+        KLog.println("[Update] Not enough RAM");
       } else if (httpCode == HTTPC_ERROR_ENCODING) {
-        Serial.println("[Update] Transfer encoding error");
+        KLog.println("[Update] Transfer encoding error");
       } else if (httpCode == HTTPC_ERROR_STREAM_WRITE) {
-        Serial.println("[Update] Stream write error");
+        KLog.println("[Update] Stream write error");
       } else if (httpCode == HTTPC_ERROR_READ_TIMEOUT) {
-        Serial.println("[Update] Read timeout");
+        KLog.println("[Update] Read timeout");
       }
     } else {
       // Получаем тело ответа для диагностики
       String errorBody = http.getString();
-      Serial.print("[Update] Response body: ");
-      Serial.println(errorBody.substring(0, 200));  // Первые 200 символов
+      KLog.print("[Update] Response body: ");
+      KLog.println(errorBody.substring(0, 200));  // Первые 200 символов
     }
   }
   
   http.end();
-  Serial.println("[Update] HTTP connection closed");
+  KLog.println("[Update] HTTP connection closed");
   return "";  // Нет обновлений или ошибка
 }
 
@@ -5486,7 +5504,7 @@ bool downloadAndInstallUpdate(String version) {
   WiFiClientSecure client;
   HTTPClient http;
   
-  Serial.println("[Update] Starting update download...");
+  KLog.println("[Update] Starting update download...");
   saveOtaResult(OTA_RES_PENDING, FIRMWARE_VERSION, version.c_str(), "Идёт обновление...");
   
   // Инициализация прогресса обновления
@@ -5497,7 +5515,7 @@ bool downloadAndInstallUpdate(String version) {
   updateProgress.startTime = millis();
   
   // Отключаем watchdog на время загрузки, чтобы избежать перезагрузки
-  Serial.println("[Update] Disabling watchdog timer during download...");
+  KLog.println("[Update] Disabling watchdog timer during download...");
   esp_task_wdt_delete(NULL);  // Удаляем текущую задачу из watchdog
   
   // Отключаем проверку сертификата для упрощения
@@ -5507,9 +5525,9 @@ bool downloadAndInstallUpdate(String version) {
   bool success = true;
   
   // 1. Загружаем прошивку
-  Serial.println("[Update] Step 1: Downloading firmware...");
+  KLog.println("[Update] Step 1: Downloading firmware...");
   if (!http.begin(client, GITHUB_FIRMWARE_URL)) {
-    Serial.println("[Update] Failed to connect to GitHub for firmware");
+    KLog.println("[Update] Failed to connect to GitHub for firmware");
     updateProgress.message = "Нет связи с GitHub";
     saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
     esp_task_wdt_add(NULL);
@@ -5523,14 +5541,14 @@ bool downloadAndInstallUpdate(String version) {
   
   if (httpCode == HTTP_CODE_OK) {
     int contentLength = http.getSize();
-    Serial.print("[Update] Firmware size: ");
-    Serial.print(contentLength);
-    Serial.println(" bytes");
+    KLog.print("[Update] Firmware size: ");
+    KLog.print(contentLength);
+    KLog.println(" bytes");
     
     if (contentLength > 0) {
       // Начинаем обновление прошивки
       if (!Update.begin(contentLength, U_FLASH)) {
-        Serial.println("[Update] Not enough space to begin firmware OTA");
+        KLog.println("[Update] Not enough space to begin firmware OTA");
         updateProgress.message = "Недостаточно места во flash";
         saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
         http.end();
@@ -5550,7 +5568,7 @@ bool downloadAndInstallUpdate(String version) {
       unsigned long lastDataTime = millis();  // Время последнего получения данных
       const unsigned long DATA_TIMEOUT = 60000;  // 60 секунд таймаут без данных
       
-      Serial.println("[Update] Starting firmware download...");
+      KLog.println("[Update] Starting firmware download...");
       
       while (http.connected() && (written < contentLength)) {
         size_t available = stream->available();
@@ -5560,10 +5578,10 @@ bool downloadAndInstallUpdate(String version) {
           if (c > 0) {
             size_t writtenBytes = Update.write(buff, c);
             if (writtenBytes != c) {
-              Serial.print("[Update] ERROR: Write mismatch! Expected ");
-              Serial.print(c);
-              Serial.print(", wrote ");
-              Serial.println(writtenBytes);
+              KLog.print("[Update] ERROR: Write mismatch! Expected ");
+              KLog.print(c);
+              KLog.print(", wrote ");
+              KLog.println(writtenBytes);
               Update.abort();
               updateProgress.message = "Ошибка записи прошивки";
               saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
@@ -5602,15 +5620,15 @@ bool downloadAndInstallUpdate(String version) {
                 u8g2.drawStr(0, 40, progressStr);
                 u8g2.sendBuffer();
                 lastProgressUpdate = now;
-                Serial.print("[Update] Firmware progress: ");
-                Serial.print(percent);
-                Serial.print("% (");
-                Serial.print(written);
-                Serial.print("/");
-                Serial.print(contentLength);
-                Serial.print(" bytes, ");
-                Serial.print(updateProgress.speedKBps, 1);
-                Serial.println(" KB/s)");
+                KLog.print("[Update] Firmware progress: ");
+                KLog.print(percent);
+                KLog.print("% (");
+                KLog.print(written);
+                KLog.print("/");
+                KLog.print(contentLength);
+                KLog.print(" bytes, ");
+                KLog.print(updateProgress.speedKBps, 1);
+                KLog.println(" KB/s)");
               }
             }
           }
@@ -5620,10 +5638,10 @@ bool downloadAndInstallUpdate(String version) {
           unsigned long timeSinceData = (now >= lastDataTime) ? (now - lastDataTime) : (ULONG_MAX - lastDataTime + now);
           
           if (timeSinceData > DATA_TIMEOUT) {
-            Serial.println("[Update] ERROR: Timeout waiting for data! Connection may be lost.");
-            Serial.print("[Update] Last data received ");
-            Serial.print(timeSinceData / 1000);
-            Serial.println(" seconds ago");
+            KLog.println("[Update] ERROR: Timeout waiting for data! Connection may be lost.");
+            KLog.print("[Update] Last data received ");
+            KLog.print(timeSinceData / 1000);
+            KLog.println(" seconds ago");
             Update.abort();  // Отменяем обновление
             updateProgress.message = "Таймаут загрузки прошивки";
             saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
@@ -5638,11 +5656,11 @@ bool downloadAndInstallUpdate(String version) {
       
       // Проверка: загружены ли все данные?
       if (written < contentLength) {
-        Serial.print("[Update] ERROR: Download incomplete! Expected ");
-        Serial.print(contentLength);
-        Serial.print(" bytes, got ");
-        Serial.print(written);
-        Serial.println(" bytes");
+        KLog.print("[Update] ERROR: Download incomplete! Expected ");
+        KLog.print(contentLength);
+        KLog.print(" bytes, got ");
+        KLog.print(written);
+        KLog.println(" bytes");
         Update.abort();  // Отменяем обновление
         updateProgress.message = "Загрузка прошивки неполная";
         saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
@@ -5651,14 +5669,14 @@ bool downloadAndInstallUpdate(String version) {
         return false;
       }
       
-      Serial.println("[Update] Firmware download complete, finalizing...");
-      Serial.print("[Update] Total bytes written: ");
-      Serial.println(written);
+      KLog.println("[Update] Firmware download complete, finalizing...");
+      KLog.print("[Update] Total bytes written: ");
+      KLog.println(written);
       
       if (!Update.end()) {
-        Serial.println("[Update] Firmware update failed during finalization!");
-        Serial.print("[Update] Error: ");
-        Serial.println(Update.errorString());
+        KLog.println("[Update] Firmware update failed during finalization!");
+        KLog.print("[Update] Error: ");
+        KLog.println(Update.errorString());
         updateProgress.message = String("Финал прошивки: ") + Update.errorString();
         saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
         http.end();
@@ -5666,11 +5684,11 @@ bool downloadAndInstallUpdate(String version) {
         return false;
       }
       
-      Serial.println("[Update] Firmware update complete!");
+      KLog.println("[Update] Firmware update complete!");
     }
   } else {
-    Serial.print("[Update] Error downloading firmware: ");
-    Serial.println(httpCode);
+    KLog.print("[Update] Error downloading firmware: ");
+    KLog.println(httpCode);
     success = false;
   }
   
@@ -5678,11 +5696,11 @@ bool downloadAndInstallUpdate(String version) {
   
   // 2. Загружаем SPIFFS (если доступен)
   if (success) {
-    Serial.println("[Update] Step 2: Downloading SPIFFS...");
+    KLog.println("[Update] Step 2: Downloading SPIFFS...");
     delay(1000);  // Небольшая пауза между загрузками
     
     if (!http.begin(client, GITHUB_SPIFFS_URL)) {
-      Serial.println("[Update] Warning: Failed to connect to GitHub for SPIFFS, continuing...");
+      KLog.println("[Update] Warning: Failed to connect to GitHub for SPIFFS, continuing...");
       // SPIFFS не критичен, продолжаем
     } else {
       http.setTimeout(30000);
@@ -5692,14 +5710,14 @@ bool downloadAndInstallUpdate(String version) {
       
       if (httpCode == HTTP_CODE_OK) {
         int contentLength = http.getSize();
-        Serial.print("[Update] SPIFFS size: ");
-        Serial.print(contentLength);
-        Serial.println(" bytes");
+        KLog.print("[Update] SPIFFS size: ");
+        KLog.print(contentLength);
+        KLog.println(" bytes");
         
         if (contentLength > 0) {
           // Начинаем обновление SPIFFS
           if (!Update.begin(contentLength, U_SPIFFS)) {
-            Serial.println("[Update] Warning: Not enough space for SPIFFS update, continuing...");
+            KLog.println("[Update] Warning: Not enough space for SPIFFS update, continuing...");
             // SPIFFS не критичен, продолжаем
           } else {
             // Обновляем информацию о размере файла для SPIFFS
@@ -5714,7 +5732,7 @@ bool downloadAndInstallUpdate(String version) {
             unsigned long lastDataTime = millis();  // Время последнего получения данных
             const unsigned long DATA_TIMEOUT = 60000;  // 60 секунд таймаут без данных
             
-            Serial.println("[Update] Starting SPIFFS download...");
+            KLog.println("[Update] Starting SPIFFS download...");
             updateProgress.stage = "spiffs";
             updateProgress.message = "Загрузка файловой системы...";
             
@@ -5726,10 +5744,10 @@ bool downloadAndInstallUpdate(String version) {
                 if (c > 0) {
                   size_t writtenBytes = Update.write(buff, c);
                   if (writtenBytes != c) {
-                    Serial.print("[Update] ERROR: SPIFFS write mismatch! Expected ");
-                    Serial.print(c);
-                    Serial.print(", wrote ");
-                    Serial.println(writtenBytes);
+                    KLog.print("[Update] ERROR: SPIFFS write mismatch! Expected ");
+                    KLog.print(c);
+                    KLog.print(", wrote ");
+                    KLog.println(writtenBytes);
                     Update.abort();
                     http.end();
                     // Прошивка уже обновлена, продолжаем
@@ -5766,15 +5784,15 @@ bool downloadAndInstallUpdate(String version) {
                       u8g2.drawStr(0, 40, progressStr);
                       u8g2.sendBuffer();
                       lastProgressUpdate = now;
-                      Serial.print("[Update] SPIFFS progress: ");
-                      Serial.print(percent);
-                      Serial.print("% (");
-                      Serial.print(written);
-                      Serial.print("/");
-                      Serial.print(contentLength);
-                      Serial.print(" bytes, ");
-                      Serial.print(updateProgress.speedKBps, 1);
-                      Serial.println(" KB/s)");
+                      KLog.print("[Update] SPIFFS progress: ");
+                      KLog.print(percent);
+                      KLog.print("% (");
+                      KLog.print(written);
+                      KLog.print("/");
+                      KLog.print(contentLength);
+                      KLog.print(" bytes, ");
+                      KLog.print(updateProgress.speedKBps, 1);
+                      KLog.println(" KB/s)");
                     }
                   }
                 }
@@ -5784,10 +5802,10 @@ bool downloadAndInstallUpdate(String version) {
                 unsigned long timeSinceData = (now >= lastDataTime) ? (now - lastDataTime) : (ULONG_MAX - lastDataTime + now);
                 
                 if (timeSinceData > DATA_TIMEOUT) {
-                  Serial.println("[Update] WARNING: SPIFFS download timeout! Aborting SPIFFS update.");
-                  Serial.print("[Update] Last data received ");
-                  Serial.print(timeSinceData / 1000);
-                  Serial.println(" seconds ago");
+                  KLog.println("[Update] WARNING: SPIFFS download timeout! Aborting SPIFFS update.");
+                  KLog.print("[Update] Last data received ");
+                  KLog.print(timeSinceData / 1000);
+                  KLog.println(" seconds ago");
                   Update.abort();
                   http.end();
                   // Прошивка уже обновлена, продолжаем без SPIFFS
@@ -5800,34 +5818,34 @@ bool downloadAndInstallUpdate(String version) {
             
             // Проверка: загружены ли все данные SPIFFS?
             if (written < contentLength) {
-              Serial.print("[Update] WARNING: SPIFFS download incomplete! Expected ");
-              Serial.print(contentLength);
-              Serial.print(" bytes, got ");
-              Serial.print(written);
-              Serial.println(" bytes");
+              KLog.print("[Update] WARNING: SPIFFS download incomplete! Expected ");
+              KLog.print(contentLength);
+              KLog.print(" bytes, got ");
+              KLog.print(written);
+              KLog.println(" bytes");
               Update.abort();
               http.end();
               // Прошивка уже обновлена, продолжаем без SPIFFS
             } else {
-              Serial.println("[Update] SPIFFS download complete, finalizing...");
-              Serial.print("[Update] Total SPIFFS bytes written: ");
-              Serial.println(written);
+              KLog.println("[Update] SPIFFS download complete, finalizing...");
+              KLog.print("[Update] Total SPIFFS bytes written: ");
+              KLog.println(written);
               
               if (Update.end()) {
-                Serial.println("[Update] SPIFFS update complete!");
+                KLog.println("[Update] SPIFFS update complete!");
               } else {
-                Serial.println("[Update] WARNING: SPIFFS update failed during finalization!");
-                Serial.print("[Update] Error: ");
-                Serial.println(Update.errorString());
+                KLog.println("[Update] WARNING: SPIFFS update failed during finalization!");
+                KLog.print("[Update] Error: ");
+                KLog.println(Update.errorString());
                 // Прошивка уже обновлена, продолжаем без SPIFFS
               }
             }
           }
         }
       } else {
-        Serial.print("[Update] Warning: SPIFFS not available (HTTP ");
-        Serial.print(httpCode);
-        Serial.println("), continuing with firmware only...");
+        KLog.print("[Update] Warning: SPIFFS not available (HTTP ");
+        KLog.print(httpCode);
+        KLog.println("), continuing with firmware only...");
       }
       
       http.end();
@@ -5835,7 +5853,7 @@ bool downloadAndInstallUpdate(String version) {
   }
   
   if (success) {
-    Serial.println("[Update] All updates complete! Rebooting...");
+    KLog.println("[Update] All updates complete! Rebooting...");
     saveOtaResult(OTA_RES_SUCCESS, FIRMWARE_VERSION, version.c_str(), "Обновление установлено");
     updateProgress.percent = 100;
     updateProgress.message = "Обновление завершено! Перезагрузка...";
@@ -5859,11 +5877,11 @@ bool downloadAndInstallUpdate(String version) {
 
 // API: Проверка обновлений
 void handleUpdateCheck() {
-  Serial.println("[Update] API: Update check requested");
+  KLog.println("[Update] API: Update check requested");
   
   // Проверяем WiFi
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[Update] API: WiFi not connected");
+    KLog.println("[Update] API: WiFi not connected");
     DynamicJsonDocument doc(256);
     doc["currentVersion"] = FIRMWARE_VERSION;
     doc["latestVersion"] = FIRMWARE_VERSION;
@@ -5891,7 +5909,7 @@ void handleUpdateCheck() {
   String response;
   serializeJson(doc, response);
   server.send(200, "application/json", response);
-  Serial.println("[Update] API: Response sent");
+  KLog.println("[Update] API: Response sent");
 }
 
 // API: Установка обновления
@@ -5916,11 +5934,11 @@ void handleUpdateInstall() {
   delay(1000);
   
   if (downloadAndInstallUpdate(latestVersion)) {
-    Serial.println("[Update] Update successful, rebooting...");
+    KLog.println("[Update] Update successful, rebooting...");
     delay(2000);
     ESP.restart();
   } else {
-    Serial.println("[Update] Update failed!");
+    KLog.println("[Update] Update failed!");
     updateProgress.isUpdating = false;
     if (updateProgress.message.length() == 0) {
       updateProgress.message = "Ошибка обновления";
@@ -6396,7 +6414,7 @@ void handleMLSettingsPost() {
     // Сохраняем в EEPROM только если были изменения
     if (settingsChanged) {
       saveMLSettingsToEEPROM();
-      Serial.print(mlSettings.enabled);
+      KLog.print(mlSettings.enabled);
     }
     
     DynamicJsonDocument responseDoc(128);
@@ -6524,10 +6542,10 @@ void setup() {
   esp_task_wdt_init(30, true);  // 30 секунд, enable panic handler
   esp_task_wdt_add(NULL);  // Добавляем текущую задачу (loop) в watchdog
   
-  Serial.println("[DIAG] Watchdog timer initialized (30s timeout)");
-  Serial.print("[DIAG] Free heap at startup: ");
-  Serial.print(ESP.getFreeHeap());
-  Serial.println(" bytes");
+  KLog.println("[DIAG] Watchdog timer initialized (30s timeout)");
+  KLog.print("[DIAG] Free heap at startup: ");
+  KLog.print(ESP.getFreeHeap());
+  KLog.println(" bytes");
   
   // Минимальный вывод при старте - только энкодер для отладки
   
@@ -6602,10 +6620,10 @@ void setup() {
   
   // Получение причины перезагрузки
   lastResetReason = getResetReasonString();
-  Serial.print("[Boot] Reset reason: ");
-  Serial.println(lastResetReason);
-  Serial.print("[Boot] Boot count: ");
-  Serial.println(bootCount);
+  KLog.print("[Boot] Reset reason: ");
+  KLog.println(lastResetReason);
+  KLog.print("[Boot] Boot count: ");
+  KLog.println(bootCount);
   
   // Загрузка настроек из EEPROM
   loadAutoSettingsFromEEPROM();
@@ -6622,7 +6640,7 @@ void setup() {
   
   // SPIFFS до журнала событий и startup (events.log на файловой системе)
   if (!SPIFFS.begin(true)) {
-    Serial.println("[ОШИБКА] SPIFFS не смонтирован!");
+    KLog.println("[ОШИБКА] SPIFFS не смонтирован!");
   } else {
     loadEventLogFromSpiffs();
   }
@@ -6664,7 +6682,7 @@ void setup() {
     
     // Инициализация mDNS
     if (MDNS.begin("kotel")) {
-      Serial.println("[mDNS] mDNS responder started: kotel.local");
+      KLog.println("[mDNS] mDNS responder started: kotel.local");
       // HTTP + отдельный тип _kotel._tcp для быстрого NSD на планшете
       MDNS.addService("http", "tcp", 80);
       MDNS.addService("kotel", "tcp", 80);
@@ -6672,16 +6690,16 @@ void setup() {
       MDNS.addServiceTxt("kotel", "tcp", "fw", FIRMWARE_VERSION);
       MDNS.addServiceTxt("kotel", "tcp", "path", "/");
     } else {
-      Serial.println("[mDNS] Error setting up mDNS responder!");
+      KLog.println("[mDNS] Error setting up mDNS responder!");
     }
 
     // UDP-маяк для обнаружения панелью за <1–2 с (порт 4210)
     if (discoveryUDP.begin(DISCOVERY_UDP_PORT)) {
       discoveryUdpReady = true;
-      Serial.println("[Discovery] UDP beacon on port 4210");
+      KLog.println("[Discovery] UDP beacon on port 4210");
     } else {
       discoveryUdpReady = false;
-      Serial.println("[Discovery] UDP beacon bind failed");
+      KLog.println("[Discovery] UDP beacon bind failed");
     }
   }
   
@@ -6830,15 +6848,15 @@ void loop() {
   if (heartbeatCounter % 10000 == 0) {
     unsigned long heartbeatElapsed = (now >= lastHeartbeatLog) ? (now - lastHeartbeatLog) : (ULONG_MAX - lastHeartbeatLog + now);
     if (heartbeatElapsed > 0) {
-      Serial.print("[DIAG] Heartbeat #");
-      Serial.print(heartbeatCounter);
-      Serial.print(" | Free heap: ");
-      Serial.print(ESP.getFreeHeap());
-      Serial.print(" bytes | Min free: ");
-      Serial.print(ESP.getMinFreeHeap());
-      Serial.print(" bytes | Uptime: ");
-      Serial.print(now / 1000);
-      Serial.println(" sec");
+      KLog.print("[DIAG] Heartbeat #");
+      KLog.print(heartbeatCounter);
+      KLog.print(" | Free heap: ");
+      KLog.print(ESP.getFreeHeap());
+      KLog.print(" bytes | Min free: ");
+      KLog.print(ESP.getMinFreeHeap());
+      KLog.print(" bytes | Uptime: ");
+      KLog.print(now / 1000);
+      KLog.println(" sec");
     }
     lastHeartbeatLog = now;
   }
@@ -6883,14 +6901,14 @@ void loop() {
        (ULONG_MAX - updateSettings.lastCheckTime + now));
     
     if (timeSinceLastCheck >= updateSettings.checkInterval) {
-      Serial.println("[Update] Auto-checking for updates...");
+      KLog.println("[Update] Auto-checking for updates...");
       String latestVersion = checkForUpdates();
       updateSettings.lastCheckTime = now;
       saveUpdateSettingsToEEPROM();
       
       if (latestVersion.length() > 0) {
-        Serial.print("[Update] New version available: ");
-        Serial.println(latestVersion);
+        KLog.print("[Update] New version available: ");
+        KLog.println(latestVersion);
         // Можно добавить уведомление через MQTT или просто логировать
       }
     }
@@ -7058,7 +7076,7 @@ void loop() {
               mqttClient.publish(topic.c_str(), details, false);
             }
             applySystemEnable(false, "heating_timeout");
-            Serial.println("[Котел] HEATING_TIMEOUT: вентилятор выключен, soft stop");
+            KLog.println("[Котел] HEATING_TIMEOUT: вентилятор выключен, soft stop");
           }
         }
       }
@@ -7085,7 +7103,7 @@ void loop() {
               mqttClient.publish(topic.c_str(), details, false);
             }
             applySystemEnable(false, "coal_burned");
-            Serial.println("[Котел] COAL_BURNED: вентилятор выключен, soft stop");
+            KLog.println("[Котел] COAL_BURNED: вентилятор выключен, soft stop");
           }
         } else {
           coalBurnedCheckStart = 0;
@@ -7103,13 +7121,13 @@ void loop() {
           logEvent("OVERHEAT", details);
         }
         systemState = "OVERHEAT";
-        Serial.print("[Безопасность] Перегрев! Температура ");
-        Serial.print(supplyTemp);
-        Serial.print(" >= ");
-        Serial.println(autoSettings.overheatTemp);
+        KLog.print("[Безопасность] Перегрев! Температура ");
+        KLog.print(supplyTemp);
+        KLog.print(" >= ");
+        KLog.println(autoSettings.overheatTemp);
       } else if (systemState == "OVERHEAT" && supplyTemp < autoSettings.overheatTemp) {
         systemState = "IDLE";
-        Serial.println("[Безопасность] Восстановление после перегрева");
+        KLog.println("[Безопасность] Восстановление после перегрева");
       }
       
       // 6. Предупреждение о высокой температуре (maxTemp)
