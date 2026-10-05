@@ -47,7 +47,7 @@
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.39"
+#define FIRMWARE_VERSION "4.2.41"
 #define DISCOVERY_UDP_PORT 4210
 #define DISCOVERY_BEACON_INTERVAL_MS 1000
 
@@ -172,6 +172,18 @@ const float PUMP_RISE_GUARD_MIN_TEMP = 30.0;  // защита по росту п
 bool systemEnabledMqttPending = false;  // отложенная публикация (не из mqttCallback)
 bool relaySettingsSavePending = false;  // EEPROM.commit нельзя из mqttCallback — откладываем
 bool circuitsMqttPending = false;       // MQTT publish контуров — вне callback / после API
+bool setpointMqttPending = false;       // публикация уставки после MQTT set — вне callback
+const unsigned long CIRCUIT_TOGGLE_MIN_MS = 2500;   // анти-дребез API/MQTT по контурам
+const unsigned long PUMP2_STAGGER_MS = 2000;        // второй насос через 2 с после первого
+const unsigned long PUMP_BOOT_HOLD_BROWNOUT_MS = 10000;  // после просадки питания — пауза реле
+unsigned long lastCircuitToggleMs = 0;
+unsigned long pumpOutputsHoldUntilMs = 0;  // до этого момента не включаем насосы (после brownout)
+bool pumpCircuitApplyPending = false;
+bool pumpCircuitApplyDemand = false;
+bool pumpCircuitApplyForceSafety = false;
+bool pump2StaggerPending = false;
+bool pump2StaggerTargetOn = false;
+unsigned long pump2StaggerAtMs = 0;
 
 // Константы для обнаружения прогорания угля
 const unsigned long COAL_BURNED_CHECK_TIME = 10 * 60 * 1000;  // 10 минут в миллисекундах
@@ -498,6 +510,8 @@ void applySystemEnable(bool enable, const char* source);
 void startPumpCoast(const char* reason);
 void updatePumpLogic(unsigned long now);
 void applyPumpCircuitOutputs(bool demand, bool forceSafety);
+void queuePumpCircuitApply(bool demand, bool forceSafety);
+void processPumpStagger(unsigned long now);
 void publishSystemEnabledMqtt();
 void queueSystemEnabledMqtt();
 bool parseMqttOnOff(const String& message, bool& enableOut);
@@ -579,14 +593,14 @@ void updateDisplay() {
   bool extinguishedScreen = boilerExtinguished || systemState == "КОТЕЛ_ПОГАС" || systemState == "ОШИБКА_РОЗЖИГА";
   
   // Температура подачи (крупным шрифтом)
-  u8g2.setFont(u8g2_font_ncenB18_tr);
+  u8g2.setFont(u8g2_font_ncenB14_tr);
   char tempStr[16];
   if (supplyTemp > 0) {
     snprintf(tempStr, sizeof(tempStr), "%.1f°C", supplyTemp);
   } else {
     strcpy(tempStr, "--°C");
   }
-  u8g2.drawStr(0, 22, tempStr);
+  u8g2.drawStr(0, 20, tempStr);
   
   if (extinguishedScreen) {
     // Мигание статуса погасания (~2 раза/сек)
@@ -1489,6 +1503,7 @@ void loadMLSettingsFromEEPROM() {
 
 // Сохранение настроек реле в EEPROM
 void saveRelaySettingsToEEPROM() {
+  esp_task_wdt_reset();
   EEPROM.begin(EEPROM_SIZE);
   DynamicJsonDocument doc(256);
   doc["fanOffIsLow"] = relaySettings.fanOffIsLow;
@@ -1958,7 +1973,7 @@ void logEvent(const char* eventType, const char* details) {
   
   // FAN_ON/OFF часто — отложенная запись; критичные события — сразу
   bool defer = (strcmp(eventType, "FAN") == 0 || strcmp(eventType, "PUMP") == 0 ||
-                strcmp(eventType, "SETPOINT") == 0);
+                strcmp(eventType, "SETPOINT") == 0 || strcmp(eventType, "CIRC") == 0);
   if (!defer) {
     saveEventLogToSpiffs();
     eventLogDirty = false;
@@ -1981,6 +1996,9 @@ void saveEventLogToSpiffs() {
     return;
   }
   for (int i = 0; i < EVENT_LOG_MAX_ENTRIES; i++) {
+    if ((i & 3) == 0) {
+      esp_task_wdt_reset();
+    }
     int idx = (eventLogWriteIndex + i) % EVENT_LOG_MAX_ENTRIES;
     if (!eventLog[idx].valid || eventLog[idx].eventType[0] == '\0') {
       continue;
@@ -2651,6 +2669,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       char det[24];
       snprintf(det, sizeof(det), "Уставка %.1f°C MQTT", setpoint);
       logEvent("SETPOINT", det);
+      // Publish вне callback — через флаг в loop (см. setpointMqttPending)
+      setpointMqttPending = true;
     }
   }
   
@@ -2744,7 +2764,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       // EEPROM.commit и MQTT publish — только из loop(), не из mqttCallback
       relaySettingsSavePending = true;
       circuitsMqttPending = true;
-      applyPumpCircuitOutputs(pumpState || pump2State || pumpCoastActive, false);
+      queuePumpCircuitApply(pumpState || pump2State || pumpCoastActive, false);
       KLog.print("[MQTT] circuit1Enabled=");
       KLog.println(enable ? "1" : "0");
     }
@@ -2755,7 +2775,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       circuit2Enabled = enable;
       relaySettingsSavePending = true;
       circuitsMqttPending = true;
-      applyPumpCircuitOutputs(pumpState || pump2State || pumpCoastActive, false);
+      queuePumpCircuitApply(pumpState || pump2State || pumpCoastActive, false);
       KLog.print("[MQTT] circuit2Enabled=");
       KLog.println(enable ? "1" : "0");
     }
@@ -3114,6 +3134,8 @@ void handleEncoderRotation() {
     if (mqttSettings.enabled && mqttClient.connected()) {
       String topic = mqttSettings.prefix + "/setpoint";
       mqttClient.publish(topic.c_str(), String(setpoint, 1).c_str(), false);
+      String simpleTopic = mqttSettings.prefix + "/simple/setpoint";
+      mqttClient.publish(simpleTopic.c_str(), String(setpoint, 1).c_str(), false);
     }
     char det[24];
     snprintf(det, sizeof(det), "Уставка %.1f°C энкодер", setpoint);
@@ -3216,8 +3238,14 @@ void handleEncoder() {
   handleEncoderButton();   // Затем обрабатываем кнопку
 }
 
-// Обработка команд через Serial для отладки энкодера
+// Обработка команд через Serial для отладки энкодера (только при KOTEL_SERIAL_LOG=1)
 void handleSerialCommands() {
+#if !KOTEL_SERIAL_LOG
+  while (Serial.available() > 0) {
+    Serial.read();
+  }
+  return;
+#else
   if (Serial.available() > 0) {
     String command = Serial.readStringUntil('\n');
     command.trim();
@@ -3311,6 +3339,7 @@ void handleSerialCommands() {
       KLog.println("Введите 'h' для справки");
     }
   }
+#endif
 }
 
 // --- Actuator layer: единая точка GPIO для FAN / PUMP / PUMP2 ---
@@ -3385,6 +3414,23 @@ void setPump2Desired(bool on) {
   logEvent("PUMP", on ? "Насос 2 вкл" : "Насос 2 выкл");
 }
 
+void queuePumpCircuitApply(bool demand, bool forceSafety) {
+  pumpCircuitApplyDemand = demand;
+  pumpCircuitApplyForceSafety = forceSafety;
+  pumpCircuitApplyPending = true;
+}
+
+void processPumpStagger(unsigned long now) {
+  if (!pump2StaggerPending) {
+    return;
+  }
+  if (now < pump2StaggerAtMs) {
+    return;
+  }
+  pump2StaggerPending = false;
+  setPump2Desired(pump2StaggerTargetOn);
+}
+
 // Применение спроса насосов с учётом контуров и safety (rise/frost)
 void applyPumpCircuitOutputs(bool demand, bool forceSafety) {
   bool c1 = circuit1Enabled;
@@ -3395,7 +3441,6 @@ void applyPumpCircuitOutputs(bool demand, bool forceSafety) {
   bool want2 = false;
 
   if (forceSafety) {
-    // Рост/мороз: включаем разрешённые контуры; если оба выкл — всё равно оба для safety
     if (bothOff) {
       want1 = true;
       want2 = true;
@@ -3404,7 +3449,6 @@ void applyPumpCircuitOutputs(bool demand, bool forceSafety) {
       want2 = c2;
     }
   } else if (bothOff) {
-    // Оба контура выкл → как выключение котла по циркуляции
     want1 = false;
     want2 = false;
   } else {
@@ -3412,6 +3456,54 @@ void applyPumpCircuitOutputs(bool demand, bool forceSafety) {
     want2 = demand && c2;
   }
 
+  unsigned long now = millis();
+  bool was1 = pumpState;
+  bool was2 = pump2State;
+
+  // Выключение — сразу, без пауз
+  if (!want1 && !want2) {
+    pump2StaggerPending = false;
+    setPumpDesired(false);
+    setPump2Desired(false);
+    return;
+  }
+  if (!want1) {
+    pump2StaggerPending = false;
+    setPumpDesired(false);
+    setPump2Desired(want2);
+    return;
+  }
+  if (!want2) {
+    pump2StaggerPending = false;
+    setPumpDesired(want1);
+    setPump2Desired(false);
+    return;
+  }
+
+  // Включение после brownout — отложить в loop (не из HTTP/MQTT)
+  if (pumpOutputsHoldUntilMs != 0 && now < pumpOutputsHoldUntilMs) {
+    queuePumpCircuitApply(demand, forceSafety);
+    return;
+  }
+
+  // Оба насоса с OFF → ON: сначала контур 1, контур 2 через PUMP2_STAGGER_MS (меньше просадки питания)
+  if (want1 && !was1 && want2 && !was2) {
+    setPumpDesired(true);
+    pump2StaggerPending = true;
+    pump2StaggerTargetOn = true;
+    pump2StaggerAtMs = now + PUMP2_STAGGER_MS;
+    return;
+  }
+
+  if (pump2StaggerPending && want2 && !was2 && was1) {
+    pump2StaggerPending = true;
+    pump2StaggerTargetOn = true;
+    pump2StaggerAtMs = now + PUMP2_STAGGER_MS;
+    setPumpDesired(want1);
+    return;
+  }
+
+  pump2StaggerPending = false;
   setPumpDesired(want1);
   setPump2Desired(want2);
 }
@@ -3750,6 +3842,12 @@ void handleSpiffsIndexUpload() {
     String name = upload.filename;
     name.toLowerCase();
     spiffsUploadPath = name.endsWith(".gz") ? "/index.html.gz" : "/index.html";
+    // Не оставлять устаревший twin: иначе gzip предпочтут старому UI
+    if (spiffsUploadPath.endsWith(".gz")) {
+      SPIFFS.remove("/index.html");
+    } else {
+      SPIFFS.remove("/index.html.gz");
+    }
     SPIFFS.remove(spiffsUploadPath);
     spiffsUploadFile = SPIFFS.open(spiffsUploadPath, "w");
     KLog.print("[FS] Upload start: ");
@@ -4065,10 +4163,12 @@ void handleSetpoint() {
       autoSettingsDirty = true;
       lastAutoSettingsChange = millis();
       
-      // Публикация уставки в MQTT (неблокирующая)
+      // Публикация уставки в MQTT (неблокирующая) — оба топика для пушей телефона
       if (mqttSettings.enabled && mqttClient.connected()) {
         String topic = mqttSettings.prefix + "/setpoint";
         mqttClient.publish(topic.c_str(), String(setpoint, 1).c_str(), false);
+        String simpleTopic = mqttSettings.prefix + "/simple/setpoint";
+        mqttClient.publish(simpleTopic.c_str(), String(setpoint, 1).c_str(), false);
       }
       char det[24];
       snprintf(det, sizeof(det), "Уставка %.1f°C веб", setpoint);
@@ -4272,11 +4372,9 @@ void handleRelaySettingsPost() {
       changed = true;
     }
     
-    // Сохраняем всегда, даже если значения не изменились (для надежности)
-    saveRelaySettingsToEEPROM();
-    KLog.println("[Реле] Настройки сохранены в EEPROM");
-    // Применяем контуры к насосам, затем синхронизируем GPIO
-    applyPumpCircuitOutputs(pumpState || pump2State || pumpCoastActive, false);
+    relaySettingsSavePending = true;
+    KLog.println("[Реле] Настройки EEPROM — отложенное сохранение");
+    queuePumpCircuitApply(pumpState || pump2State || pumpCoastActive, false);
     syncRelays();
     
     DynamicJsonDocument responseDoc(384);
@@ -4321,25 +4419,41 @@ void handleCircuits() {
       server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
       return;
     }
+    unsigned long toggleNow = millis();
+    bool circuitChanged = false;
     if (doc.containsKey("circuit1Enabled")) {
       bool newVal = doc["circuit1Enabled"].as<bool>();
       if (newVal != circuit1Enabled) {
+        if (toggleNow - lastCircuitToggleMs < CIRCUIT_TOGGLE_MIN_MS && lastCircuitToggleMs != 0) {
+          server.send(429, "application/json",
+                      "{\"error\":\"Слишком частое переключение контура, подождите 2–3 с\"}");
+          return;
+        }
         circuit1Enabled = newVal;
+        lastCircuitToggleMs = toggleNow;
+        circuitChanged = true;
         logEvent("CIRC", newVal ? "Контур 1 разрешён" : "Контур 1 отключён");
       }
     }
     if (doc.containsKey("circuit2Enabled")) {
       bool newVal = doc["circuit2Enabled"].as<bool>();
       if (newVal != circuit2Enabled) {
+        if (toggleNow - lastCircuitToggleMs < CIRCUIT_TOGGLE_MIN_MS && lastCircuitToggleMs != 0) {
+          server.send(429, "application/json",
+                      "{\"error\":\"Слишком частое переключение контура, подождите 2–3 с\"}");
+          return;
+        }
         circuit2Enabled = newVal;
+        lastCircuitToggleMs = toggleNow;
+        circuitChanged = true;
         logEvent("CIRC", newVal ? "Контур 2 разрешён" : "Контур 2 отключён");
       }
     }
-    saveRelaySettingsToEEPROM();
-    // Немедленно применить выход насосов (отключение контура → насос OFF)
-    applyPumpCircuitOutputs(pumpState || pump2State || pumpCoastActive, false);
-    // MQTT publish после ответа HTTP — не блокировать WebServer пачкой publish
-    circuitsMqttPending = true;
+    if (circuitChanged) {
+      relaySettingsSavePending = true;
+      queuePumpCircuitApply(pumpState || pump2State || pumpCoastActive, false);
+      circuitsMqttPending = true;
+    }
     DynamicJsonDocument responseDoc(256);
     responseDoc["success"] = true;
     responseDoc["circuit1Enabled"] = circuit1Enabled;
@@ -5546,6 +5660,17 @@ bool downloadAndInstallUpdate(String version) {
     KLog.println(" bytes");
     
     if (contentLength > 0) {
+#ifndef KOTEL_OTA_MAX_BYTES
+#define KOTEL_OTA_MAX_BYTES 1310720
+#endif
+      if (contentLength > (int)KOTEL_OTA_MAX_BYTES) {
+        KLog.println("[Update] Firmware too large for OTA partition");
+        updateProgress.message = "Прошивка больше OTA-слота";
+        saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
+        http.end();
+        esp_task_wdt_add(NULL);
+        return false;
+      }
       // Начинаем обновление прошивки
       if (!Update.begin(contentLength, U_FLASH)) {
         KLog.println("[Update] Not enough space to begin firmware OTA");
@@ -6624,6 +6749,11 @@ void setup() {
   KLog.println(lastResetReason);
   KLog.print("[Boot] Boot count: ");
   KLog.println(bootCount);
+  if (lastResetReason.indexOf("Просадка") >= 0 || lastResetReason.indexOf("WDT") >= 0 ||
+      lastResetReason.indexOf("Паника") >= 0) {
+    pumpOutputsHoldUntilMs = millis() + PUMP_BOOT_HOLD_BROWNOUT_MS;
+    KLog.println("[Boot] Пауза включения насосов после сбоя питания/CPU");
+  }
   
   // Загрузка настроек из EEPROM
   loadAutoSettingsFromEEPROM();
@@ -6939,7 +7069,24 @@ void loop() {
       if (circuitsMqttPending) {
         publishCircuitsMqtt();
       }
+      if (setpointMqttPending) {
+        setpointMqttPending = false;
+        if (mqttClient.connected()) {
+          String topic = mqttSettings.prefix + "/setpoint";
+          mqttClient.publish(topic.c_str(), String(setpoint, 1).c_str(), false);
+          String simpleTopic = mqttSettings.prefix + "/simple/setpoint";
+          mqttClient.publish(simpleTopic.c_str(), String(setpoint, 1).c_str(), false);
+        }
+      }
     }
+  }
+
+  processPumpStagger(now);
+
+  if (pumpCircuitApplyPending) {
+    pumpCircuitApplyPending = false;
+    esp_task_wdt_reset();
+    applyPumpCircuitOutputs(pumpCircuitApplyDemand, pumpCircuitApplyForceSafety);
   }
 
   // EEPROM.commit вне mqttCallback — иначе зависание TCP/MQTT

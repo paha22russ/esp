@@ -348,6 +348,9 @@
             margin: 20px 0 !important;
         }
 
+        /* Dom / Comfort — скрыты везде (PC + телефон), UI идентичен */
+        .hide-mobile-compact { display: none !important; }
+
         /* Компактный главный экран телефона — один экран без прокрутки */
         @media (max-width: 480px) {
             body { font-size: 14px; }
@@ -373,15 +376,19 @@
             }
             .main-temps-container .temp-label { font-size: 0.85em !important; }
             .main-temps-container .temp-value { font-size: 2em !important; margin: 6px 0 !important; }
-            .hide-mobile-compact { display: none !important; }
-            #espSysStrip { display: none !important; }
-            .status-indicator.cpu-ram-merged { display: inline-flex !important; }
+            #espSysStrip {
+                display: flex !important;
+                padding: 6px 8px !important;
+                margin: 4px 0 !important;
+                font-size: 0.82em !important;
+                gap: 4px 10px !important;
+            }
+            #espSysStrip > div { min-width: 64px !important; }
+            #espSysStrip #cpuLoadMain { font-size: 1.05em !important; }
+            #espSysStrip #loopMsMain,
+            #espSysStrip #heapMain,
+            #espSysStrip #fwVersionMain { font-size: 1em !important; }
             .mobile-compact-block { padding: 6px !important; margin: 4px 0 !important; font-size: 0.78em !important; }
-            .dropdown-item.hide-mobile-compact { display: none !important; }
-        }
-
-        @media (min-width: 481px) {
-            .status-indicator.cpu-ram-merged { display: none !important; }
         }
 
         /* Адаптация для книжной ориентации */
@@ -934,18 +941,6 @@
                 <div class="status-indicator">
                     <span style="color: #aaa;">MQTT:</span>
                     <strong id="mqttStatus">--</strong>
-                </div>
-                <div class="status-indicator">
-                    <span style="color: #aaa;">ЦП:</span>
-                    <strong id="cpuLoadStatus">--</strong>
-                </div>
-                <div class="status-indicator">
-                    <span style="color: #aaa;">RAM:</span>
-                    <strong id="heapStatus">--</strong>
-                </div>
-                <div class="status-indicator cpu-ram-merged">
-                    <span style="color: #aaa;">Система:</span>
-                    <strong id="sysLoadMerged">--</strong>
                 </div>
             </div>
         </div>
@@ -2716,26 +2711,16 @@
                         }
                     }
 
-                    // Загрузка ЦП ESP + свободная память (шапка + главная полоса)
+                    // Загрузка ЦП / RAM / версия — только на главной (espSysStrip)
                     var cpuVal = null;
                     if (d.cpuLoad !== undefined && d.cpuLoad !== null) {
                         cpuVal = Number(d.cpuLoad);
                     }
-                    var cpuText = '--';
                     var cpuColor = '#2ECC71';
                     if (cpuVal !== null && !isNaN(cpuVal)) {
-                        cpuText = cpuVal.toFixed(0) + '%';
-                        if (d.maxLoopMs !== undefined && d.maxLoopMs !== null) {
-                            cpuText += ' / ' + d.maxLoopMs + 'мс';
-                        }
                         if (cpuVal >= 80) cpuColor = '#E74C3C';
                         else if (cpuVal >= 50) cpuColor = '#F39C12';
                         else cpuColor = '#2ECC71';
-                    }
-                    var cpuEl = document.getElementById('cpuLoadStatus');
-                    if (cpuEl && cpuVal !== null && !isNaN(cpuVal)) {
-                        cpuEl.textContent = cpuText;
-                        cpuEl.style.color = cpuColor;
                     }
                     var cpuMain = document.getElementById('cpuLoadMain');
                     if (cpuMain && cpuVal !== null && !isNaN(cpuVal)) {
@@ -2746,31 +2731,14 @@
                     if (loopMain && d.maxLoopMs !== undefined && d.maxLoopMs !== null) {
                         loopMain.textContent = d.maxLoopMs + ' мс';
                     }
-                    var heapEl = document.getElementById('heapStatus');
                     var heapKb = null;
                     if (d.freeHeap !== undefined && d.freeHeap !== null) {
                         heapKb = Math.round(Number(d.freeHeap) / 1024);
-                    }
-                    if (heapEl && heapKb !== null) {
-                        heapEl.textContent = heapKb + ' КБ';
-                        if (Number(d.freeHeap) < 50000) heapEl.style.color = '#E74C3C';
-                        else heapEl.style.color = '#aaa';
                     }
                     var heapMain = document.getElementById('heapMain');
                     if (heapMain && heapKb !== null) {
                         heapMain.textContent = heapKb + ' КБ';
                         heapMain.style.color = (Number(d.freeHeap) < 50000) ? '#E74C3C' : '#ecf0f1';
-                    }
-                    var mergedEl = document.getElementById('sysLoadMerged');
-                    if (mergedEl) {
-                        var merged = '--';
-                        if (cpuVal !== null && !isNaN(cpuVal) && heapKb !== null) {
-                            merged = 'ЦП ' + cpuVal.toFixed(0) + '% · RAM ' + heapKb + ' КБ';
-                        }
-                        mergedEl.textContent = merged;
-                        if (cpuVal !== null && cpuVal >= 80) mergedEl.style.color = '#E74C3C';
-                        else if (cpuVal !== null && cpuVal >= 50) mergedEl.style.color = '#F39C12';
-                        else mergedEl.style.color = '#2ECC71';
                     }
                     var fwMain = document.getElementById('fwVersionMain');
                     if (fwMain && d.firmwareVersion) {
