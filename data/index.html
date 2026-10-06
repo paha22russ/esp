@@ -16,17 +16,6 @@
             overflow-x: hidden;
         }
         
-        /* Перегрев - яркий красный фон */
-        body.overheat {
-            background: #cc0000 !important;
-            animation: overheatPulse 1s infinite;
-        }
-        
-        @keyframes overheatPulse {
-            0%, 100% { background: #cc0000; }
-            50% { background: #ff3333; }
-        }
-        
         /* Погасание - приглушенный оранжевый фон (не ярко) */
         body.extinguishing {
             background: #3a2a1a;
@@ -488,16 +477,16 @@
             box-shadow: 7px 7px 15px rgba(0,0,0,0.4);
         }
 
-        .temp-card.overheat {
-            background: linear-gradient(135deg, #dc3545 0%, #c82333 100%);
-            animation: shake 0.5s infinite;
+        .overheat-bang {
+            display: none;
+            color: #ff4444;
+            font-weight: 800;
+            font-size: 0.85em;
+            margin-left: 4px;
+            vertical-align: middle;
+            line-height: 1;
         }
-
-        @keyframes shake {
-            0%, 100% { transform: translateX(0); }
-            25% { transform: translateX(-2px); }
-            75% { transform: translateX(2px); }
-        }
+        .overheat-bang.show { display: inline; }
 
         .temp-label {
             font-size: 11px;
@@ -576,32 +565,6 @@
                 opacity: 0.9;
                 transform: translateY(2px);
             }
-        }
-
-        .overheat-warning {
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            background: rgba(204, 0, 0, 0.95);
-            color: #fff;
-            padding: 30px 50px;
-            border-radius: 15px;
-            font-size: 32px;
-            font-weight: bold;
-            z-index: 1000;
-            display: none;
-            box-shadow: 0 0 50px rgba(255, 0, 0, 0.8);
-            animation: warningPulse 0.5s infinite;
-        }
-
-        @keyframes warningPulse {
-            0%, 100% { transform: translate(-50%, -50%) scale(1); }
-            50% { transform: translate(-50%, -50%) scale(1.05); }
-        }
-
-        .overheat-warning.show {
-            display: block;
         }
 
         .setpoint-control {
@@ -947,10 +910,6 @@
 
         <!-- Главная страница -->
         <div class="main-page" id="mainPage">
-            <div class="overheat-warning" id="overheatWarning">
-                ⚠️ ПЕРЕГРЕВ! Температура превышает безопасный уровень
-            </div>
-
             <!-- Контейнер с крупными температурами подачи и дома рядом -->
             <div class="main-temps-container">
                 <!-- Карточка подачи -->
@@ -958,6 +917,7 @@
                     <div class="temp-label" id="supplyTempLabel">Подача</div>
                     <div class="temp-value">
                         <span id="supplyTempValue">--</span><span class="temp-unit">°C</span>
+                        <span class="overheat-bang" id="supplyOverheatBang" title="Перегрев">!</span>
                         <span class="temp-trend-arrow" id="supplyTempTrendArrow" style="display: none;"></span>
                     </div>
                     <div class="setpoint-section auto-only" style="margin-top: 4px; padding-top: 4px; border-top: 1px solid #3a3a3a;">
@@ -2685,14 +2645,14 @@
                         }
                     }
                     
-                    // Обновление предупреждения о перегреве
-                    if (d.supplyTemp >= 77) {
-                        document.getElementById('overheatWarning').classList.add('show');
-                        document.getElementById('supplyTempCard').classList.add('overheat');
-                    } else {
-                        document.getElementById('overheatWarning').classList.remove('show');
-                        document.getElementById('supplyTempCard').classList.remove('overheat');
-                    }
+                    // Перегрев: только «!» у показаний подачи (без полноэкранного мигания)
+                    const ohLimit = (d.overheatTemp != null && !isNaN(d.overheatTemp)) ? Number(d.overheatTemp) : 77;
+                    const st = d.systemState || d.state || '';
+                    const isOverheat = (st === 'OVERHEAT') ||
+                        (d.comfortState === 'OVERHEAT') ||
+                        (d.supplyTemp != null && d.supplyTemp >= ohLimit);
+                    const bang = document.getElementById('supplyOverheatBang');
+                    if (bang) bang.classList.toggle('show', !!isOverheat);
                     
                     if (d.wifiStatus) {
                         document.getElementById('wifiStatus').textContent = d.wifiStatus;
