@@ -56,7 +56,7 @@ extern "C" bool verifyRollbackLater() { return true; }
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.45"
+#define FIRMWARE_VERSION "4.2.46"
 #define DISCOVERY_UDP_PORT 4210
 #define DISCOVERY_BEACON_INTERVAL_MS 1000
 
@@ -1420,6 +1420,20 @@ static bool wifiAssociationHealthy() {
 
 RTC_DATA_ATTR uint8_t rtcWifiChipRestarts = 0;
 
+static bool isOtaPendingVerify() {
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  esp_ota_img_states_t otaState;
+  return running &&
+         esp_ota_get_state_partition(running, &otaState) == ESP_OK &&
+         otaState == ESP_OTA_IMG_PENDING_VERIFY;
+}
+
+static void otaSerialLine(const char* line) {
+  // Всегда в Serial — даже при KOTEL_SERIAL_LOG=0 (диагностика OTA по USB).
+  Serial.println(line);
+  KLog.println(line);
+}
+
 void serviceWifiLink(unsigned long now) {
   static unsigned long unhealthySince = 0;
   static unsigned long lastRecoverMs = 0;
@@ -1456,12 +1470,17 @@ void serviceWifiLink(unsigned long now) {
   recoveries++;
   noteLoopStage("wifi");
   esp_task_wdt_reset();
-  if (recoveries >= 3 && rtcWifiChipRestarts < 2) {
+  // Пока слот PENDING_VERIFY, рестарт чипа из Wi-Fi = откат загрузчиком. Только radio reconnect.
+  if (recoveries >= 3 && rtcWifiChipRestarts < 2 && !isOtaPendingVerify()) {
     rtcWifiChipRestarts++;
     logEvent("WIFI", "рестарт чипа");
     delay(200);
     ESP.restart();
     return;
+  }
+  if (isOtaPendingVerify() && recoveries >= 3) {
+    recoveries = 1;  // не копить до рестарта
+    otaSerialLine("[OTA] WiFi recover: chip restart deferred (PENDING_VERIFY)");
   }
   logEvent("WIFI", "радио перезапуск");
   WiFi.disconnect(false, false);
@@ -5689,14 +5708,14 @@ void clearSpiffsPending() {
   }
 }
 
-// Слот остаётся PENDING_VERIFY, пока нет Wi-Fi и насосов (или оба контура явно выключены).
-// Любая перезагрузка до этой отметки откатывает загрузчик на прошлую прошивку.
+// Подтверждение OTA: локальное здоровье котла. Wi-Fi/VPS НЕ обязательны.
+// Любая перезагрузка до mark_valid откатывает слот (verifyRollbackLater=true).
 void confirmOtaIfHealthy() {
   static bool decided = false;
+  static bool announced = false;
+  static bool healthLogged = false;
+  static unsigned long pendingSince = 0;
   if (decided) return;
-  if (WiFi.status() != WL_CONNECTED) return;
-  bool bothCircuitsOff = !circuit1Enabled && !circuit2Enabled;
-  if (!(pumpState || pump2State || bothCircuitsOff)) return;
 
   const esp_partition_t* running = esp_ota_get_running_partition();
   esp_ota_img_states_t otaState;
@@ -5708,11 +5727,97 @@ void confirmOtaIfHealthy() {
     decided = true;
     return;
   }
-  if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
-    logEvent("OTA", "подтверждена");
-    saveOtaResult(OTA_RES_SUCCESS, otaResult.fromVersion, FIRMWARE_VERSION, "Подтверждена после Wi-Fi и насосов");
+
+  if (!announced) {
+    otaSerialLine("[OTA] New firmware detected");
+    otaSerialLine("[OTA] Pending verification");
+    logEvent("OTA", "PENDING_VERIFY");
+    announced = true;
+    pendingSince = millis();
+  }
+
+  // Дать bootEnergize / stagger насосов и EEPROM закончиться (~8 с).
+  if (millis() - pendingSince < 8000UL) {
+    return;
+  }
+
+  const bool wifiOk = (WiFi.status() == WL_CONNECTED) && (WiFi.localIP() != IPAddress((uint32_t)0));
+  const bool bothCircuitsOff = !circuit1Enabled && !circuit2Enabled;
+  const bool outputsOk = pumpState || pump2State || bothCircuitsOff;
+
+  if (!outputsOk) {
+    // Ждём логику насосов/контуров; Wi-Fi не требуется.
+    if (millis() - pendingSince < 45000UL) {
+      return;
+    }
+    otaSerialLine("[OTA] Health check started");
+    otaSerialLine(wifiOk
+                     ? "[OTA] WiFi status: connected (informational)"
+                     : "[OTA] WiFi status: offline (not required for confirm)");
+    {
+      char line[96];
+      snprintf(line, sizeof(line), "[OTA] Outputs: pump1=%d pump2=%d c1=%d c2=%d",
+               pumpState ? 1 : 0, pump2State ? 1 : 0,
+               circuit1Enabled ? 1 : 0, circuit2Enabled ? 1 : 0);
+      otaSerialLine(line);
+    }
+    otaSerialLine("[OTA] VERIFY FAILED: reason=outputs_not_ready");
+    logEvent("OTA", "VERIFY FAILED outputs");
+    saveOtaResult(OTA_RES_FAIL, otaResult.fromVersion, FIRMWARE_VERSION,
+                  "VERIFY FAILED: reason=outputs_not_ready");
     decided = true;
-    KLog.println("[Update] OTA slot marked valid");
+    esp_ota_mark_app_invalid_rollback_and_reboot();
+    return;
+  }
+
+  if (!healthLogged) {
+    otaSerialLine("[OTA] Health check started");
+    {
+      char line[96];
+      if (wifiOk) {
+        snprintf(line, sizeof(line), "[OTA] WiFi status: connected %s", WiFi.localIP().toString().c_str());
+      } else if (WiFi.getMode() == WIFI_AP || WiFi.getMode() == WIFI_AP_STA) {
+        snprintf(line, sizeof(line), "[OTA] WiFi status: AP mode (not required for confirm)");
+      } else {
+        snprintf(line, sizeof(line), "[OTA] WiFi status: offline (not required for confirm)");
+      }
+      otaSerialLine(line);
+    }
+    {
+      int n1 = (int)sensors1.getDeviceCount();
+      int n2 = (int)sensors2.getDeviceCount();
+      char line[80];
+      if (n1 + n2 > 0) {
+        snprintf(line, sizeof(line), "[OTA] Sensors: ok bus1=%d bus2=%d", n1, n2);
+      } else {
+        snprintf(line, sizeof(line), "[OTA] Sensors: missing (non-blocking)");
+      }
+      otaSerialLine(line);
+    }
+    {
+      char line[96];
+      snprintf(line, sizeof(line), "[OTA] Outputs: pump1=%d pump2=%d c1=%d c2=%d",
+               pumpState ? 1 : 0, pump2State ? 1 : 0,
+               circuit1Enabled ? 1 : 0, circuit2Enabled ? 1 : 0);
+      otaSerialLine(line);
+    }
+    otaSerialLine("[OTA] Watchdog: ok (loop running)");
+    healthLogged = true;
+  }
+
+  if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+    otaSerialLine("[OTA] Health check PASSED");
+    otaSerialLine("[OTA] Firmware marked valid");
+    logEvent("OTA", wifiOk ? "подтверждена" : "подтверждена без Wi-Fi");
+    saveOtaResult(OTA_RES_SUCCESS, otaResult.fromVersion, FIRMWARE_VERSION,
+                  wifiOk ? "Подтверждена (локально + Wi-Fi)" : "Подтверждена локально без Wi-Fi");
+    decided = true;
+  } else {
+    otaSerialLine("[OTA] VERIFY FAILED: reason=esp_ota_mark_app_valid_failed");
+    logEvent("OTA", "VERIFY FAILED mark_valid");
+    saveOtaResult(OTA_RES_FAIL, otaResult.fromVersion, FIRMWARE_VERSION,
+                  "VERIFY FAILED: reason=esp_ota_mark_app_valid_failed");
+    decided = true;
   }
 }
 
@@ -7006,8 +7111,14 @@ void setup() {
     wifiManager.setConfigPortalTimeout(180);
     
     if (!wifiManager.autoConnect("KotelAP", "kotel12345")) {
-      delay(1000);  // Уменьшена задержка перед перезагрузкой
-      ESP.restart();
+      // PENDING_VERIFY: рестарт = откат. Остаёмся без STA, отопление важнее Wi‑Fi.
+      if (isOtaPendingVerify()) {
+        otaSerialLine("[OTA] WiFiManager timeout: continue without STA (PENDING_VERIFY)");
+        logEvent("WIFI", "AP timeout, без рестарта (OTA pending)");
+      } else {
+        delay(1000);
+        ESP.restart();
+      }
     }
   }
   
@@ -7542,7 +7653,12 @@ void loop() {
   
   // Проверка необходимости перезагрузки (для handleWiFiReset)
   if (pendingRebootTime > 0 && now >= pendingRebootTime) {
-    ESP.restart();
+    if (isOtaPendingVerify()) {
+      otaSerialLine("[OTA] deferred pendingReboot (PENDING_VERIFY)");
+      pendingRebootTime = now + 30000UL;  // подождать подтверждение
+    } else {
+      ESP.restart();
+    }
   }
   
   // Отложенное сохранение в EEPROM (через 2 секунды после последнего изменения)
