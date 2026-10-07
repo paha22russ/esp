@@ -23,6 +23,7 @@
 #include <driver/gpio.h>
 #include <esp_sleep.h>
 #include <esp_ota_ops.h>
+#include <esp_wifi.h>
 
 // Ядро Arduino иначе помечает OTA-слот годным в initArduino(), до setup().
 // Пока функция возвращает true, слот остаётся PENDING_VERIFY.
@@ -55,7 +56,7 @@ extern "C" bool verifyRollbackLater() { return true; }
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.44"
+#define FIRMWARE_VERSION "4.2.45"
 #define DISCOVERY_UDP_PORT 4210
 #define DISCOVERY_BEACON_INTERVAL_MS 1000
 
@@ -1398,12 +1399,84 @@ void loadWiFiSettingsFromEEPROM() {
   EEPROM.end();
 }
 
+
+// Модемный сон на ESP32 с частью роутеров (в том числе Xiaomi) оставляет цикл живым,
+// а радио мёртвым. Дальше страница не возвращается, пока свой сторож радиомодуля
+// не даст «WDT (общий)». Здесь сон выключен, и пропавшая станция поднимается снова.
+static void wifiKeepRadioAwake() {
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(true);
+  WiFi.setSleep(false);
+  esp_wifi_set_ps(WIFI_PS_NONE);
+}
+
+static bool wifiAssociationHealthy() {
+  if (WiFi.getMode() != WIFI_STA) return true;
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (WiFi.localIP() == IPAddress((uint32_t)0)) return false;
+  wifi_ap_record_t info;
+  return esp_wifi_sta_get_ap_info(&info) == ESP_OK;
+}
+
+RTC_DATA_ATTR uint8_t rtcWifiChipRestarts = 0;
+
+void serviceWifiLink(unsigned long now) {
+  static unsigned long unhealthySince = 0;
+  static unsigned long lastRecoverMs = 0;
+  static unsigned long healthySince = 0;
+  static uint8_t recoveries = 0;
+  static unsigned long lastProbeMs = 0;
+
+  if (updateProgress.isUpdating) return;
+  if (WiFi.getMode() != WIFI_STA) return;
+  if (now - lastProbeMs < 2000UL && lastProbeMs != 0 && now >= lastProbeMs) return;
+  lastProbeMs = now;
+
+  wifiKeepRadioAwake();
+  if (wifiAssociationHealthy()) {
+    if (healthySince == 0) healthySince = now;
+    if (now - healthySince > 300000UL) {
+      rtcWifiChipRestarts = 0;
+      recoveries = 0;
+    }
+    unhealthySince = 0;
+    return;
+  }
+  healthySince = 0;
+  if (unhealthySince == 0) unhealthySince = now;
+  unsigned long down = (now >= unhealthySince) ? (now - unhealthySince) : 0;
+  if (down < 45000UL) return;
+  if (lastRecoverMs != 0 && now >= lastRecoverMs && now - lastRecoverMs < 60000UL) return;
+
+  const String& ssid = wifiSettings.primarySSID.length() ? wifiSettings.primarySSID : wifiSettings.backupSSID;
+  const String& pass = wifiSettings.primarySSID.length() ? wifiSettings.primaryPassword : wifiSettings.backupPassword;
+  if (ssid.length() == 0) return;
+
+  lastRecoverMs = now;
+  recoveries++;
+  noteLoopStage("wifi");
+  esp_task_wdt_reset();
+  if (recoveries >= 3 && rtcWifiChipRestarts < 2) {
+    rtcWifiChipRestarts++;
+    logEvent("WIFI", "рестарт чипа");
+    delay(200);
+    ESP.restart();
+    return;
+  }
+  logEvent("WIFI", "радио перезапуск");
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_STA);
+  wifiKeepRadioAwake();
+  WiFi.begin(ssid.c_str(), pass.c_str());
+}
+
 // Функция подключения к WiFi с приоритетом
 bool connectToWiFi() {
   // Сначала пытаемся подключиться к основному WiFi (даже при слабом сигнале)
   if (wifiSettings.primarySSID.length() > 0) {
     
     WiFi.mode(WIFI_STA);
+    wifiKeepRadioAwake();
     WiFi.begin(wifiSettings.primarySSID.c_str(), wifiSettings.primaryPassword.c_str());
     
     // Увеличенное количество попыток и таймаут для надежности
@@ -1442,6 +1515,7 @@ bool connectToWiFi() {
   if (wifiSettings.backupSSID.length() > 0) {
     
     WiFi.mode(WIFI_STA);
+    wifiKeepRadioAwake();
     WiFi.begin(wifiSettings.backupSSID.c_str(), wifiSettings.backupPassword.c_str());
     
     int attempts = 0;
@@ -7111,6 +7185,7 @@ void loop() {
   esp_task_wdt_reset();
   confirmOtaIfHealthy();
   servicePendingSpiffs();
+  serviceWifiLink(now);
   
   // Heartbeat - счетчик итераций loop() для диагностики
   static unsigned long heartbeatCounter = 0;
