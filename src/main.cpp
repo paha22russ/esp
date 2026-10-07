@@ -20,6 +20,14 @@
 #include <ESPmDNS.h>  // mDNS для доступа по kotel.local
 #include <esp_task_wdt.h>  // Watchdog timer для диагностики
 #include <esp_system.h>  // Для получения причины перезагрузки
+#include <driver/gpio.h>
+#include <esp_sleep.h>
+#include <esp_ota_ops.h>
+
+// Ядро Arduino иначе помечает OTA-слот годным в initArduino(), до setup().
+// Пока функция возвращает true, слот остаётся PENDING_VERIFY.
+// Загрузчик откатит прошивку, если она перезагрузится до confirmOtaIfHealthy().
+extern "C" bool verifyRollbackLater() { return true; }
 
 #ifdef U8X8_HAVE_HW_I2C
 #include <Wire.h>
@@ -47,7 +55,7 @@
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.42"
+#define FIRMWARE_VERSION "4.2.44"
 #define DISCOVERY_UDP_PORT 4210
 #define DISCOVERY_BEACON_INTERVAL_MS 1000
 
@@ -184,6 +192,14 @@ bool pumpCircuitApplyForceSafety = false;
 bool pump2StaggerPending = false;
 bool pump2StaggerTargetOn = false;
 unsigned long pump2StaggerAtMs = 0;
+// Переживает сторожевой сброс (не обрыв питания): где остановился прошлый цикл
+RTC_DATA_ATTR char rtcLoopStage[16] = "boot";
+
+void noteLoopStage(const char* stage) {
+  if (!stage) return;
+  strncpy(rtcLoopStage, stage, sizeof(rtcLoopStage) - 1);
+  rtcLoopStage[sizeof(rtcLoopStage) - 1] = '\0';
+}
 
 // Константы для обнаружения прогорания угля
 const unsigned long COAL_BURNED_CHECK_TIME = 10 * 60 * 1000;  // 10 минут в миллисекундах
@@ -512,6 +528,10 @@ void updatePumpLogic(unsigned long now);
 void applyPumpCircuitOutputs(bool demand, bool forceSafety);
 void queuePumpCircuitApply(bool demand, bool forceSafety);
 void processPumpStagger(unsigned long now);
+void drivePumpPin(uint8_t pin, int level);
+void bootEnergizePumps();
+void applyBootCircuitsFromSettings();
+void servicePumpBootWindow();
 void publishSystemEnabledMqtt();
 void queueSystemEnabledMqtt();
 bool parseMqttOnOff(const String& message, bool& enableOut);
@@ -523,6 +543,65 @@ void handleUpdateAck();
 void handleTunnelSettingsGet();
 void handleTunnelSettingsPost();
 void handleTunnelFrpcConfig();
+
+
+// Насос ВКЛ = HIGH. GPIO26 (насос 2) удерживается RTC-защёлкой и не отпускает реле на WDT.
+void drivePumpPin(uint8_t pin, int level) {
+  if (pin == PIN_RELAY_PUMP2) {
+    gpio_hold_dis((gpio_num_t)PIN_RELAY_PUMP2);
+  }
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, level);
+  if (pin == PIN_RELAY_PUMP2 && level == HIGH) {
+    gpio_set_level((gpio_num_t)PIN_RELAY_PUMP2, 1);
+    gpio_hold_en((gpio_num_t)PIN_RELAY_PUMP2);
+    gpio_deep_sleep_hold_en();
+  }
+}
+
+// Сразу после сброса, до Wi-Fi: насос 1 сразу, насос 2 через 2 с (просадка питания).
+void bootEnergizePumps() {
+  pinMode(PIN_RELAY_FAN, OUTPUT);
+  pinMode(PIN_RELAY_PUMP, OUTPUT);
+  pinMode(PIN_RELAY_PUMP2, OUTPUT);
+  pinMode(PIN_RELAY_SENSORS, OUTPUT);
+  digitalWrite(PIN_RELAY_FAN, LOW);
+  pumpState = true;
+  pump2State = false;
+  pump2StaggerPending = true;
+  pump2StaggerTargetOn = true;
+  pump2StaggerAtMs = millis() + PUMP2_STAGGER_MS;
+  drivePumpPin(PIN_RELAY_PUMP, HIGH);
+  drivePumpPin(PIN_RELAY_PUMP2, LOW);
+  sensorsRelayState = true;
+  digitalWrite(PIN_RELAY_SENSORS, HIGH);
+  noteLoopStage("pumps");
+}
+
+// После чтения EEPROM: выключенный контур гасим, разрешённый держим включённым.
+void applyBootCircuitsFromSettings() {
+  if (!circuit1Enabled) {
+    pumpState = false;
+    drivePumpPin(PIN_RELAY_PUMP, relaySettings.pumpOffIsLow ? LOW : HIGH);
+  } else if (!pumpState) {
+    pumpState = true;
+    drivePumpPin(PIN_RELAY_PUMP, HIGH);
+  }
+  if (!circuit2Enabled) {
+    pump2StaggerPending = false;
+    pump2State = false;
+    drivePumpPin(PIN_RELAY_PUMP2, relaySettings.pumpOffIsLow ? LOW : HIGH);
+  } else if (!pump2State && !pump2StaggerPending) {
+    pump2StaggerPending = true;
+    pump2StaggerTargetOn = true;
+    pump2StaggerAtMs = millis() + PUMP2_STAGGER_MS;
+  }
+}
+
+void servicePumpBootWindow() {
+  esp_task_wdt_reset();
+  processPumpStagger(millis());
+}
 
 // Функция обработки прерывания энкодера с улучшенной фильтрацией дребезга
 void IRAM_ATTR encoderISR() {
@@ -1011,15 +1090,24 @@ void checkSensorsDetection() {
   
   // Проверяем обнаружение датчиков (периодически, не каждый цикл)
   static unsigned long lastDetectionCheck = 0;
-  if (now - lastDetectionCheck > 5000 || now < lastDetectionCheck) {  // Проверяем каждые 5 секунд
+  // Полный поиск OneWire глушит прерывания и рядом с Wi-Fi роняет сторожевой таймер.
+  // Пока датчики есть — используем уже известное число. Поиск только если шина пустая.
+  if (now - lastDetectionCheck > 60000UL || now < lastDetectionCheck) {
     lastDetectionCheck = now;
-    
-    // Инициализируем шины для проверки
-    sensors1.begin();
-    sensors2.begin();
-    
     int count1 = sensors1.getDeviceCount();
     int count2 = sensors2.getDeviceCount();
+    if (count1 + count2 == 0) {
+      noteLoopStage("scan");
+      esp_task_wdt_reset();
+      sensors1.begin();
+      sensors2.begin();
+      sensors1.setWaitForConversion(false);
+      sensors2.setWaitForConversion(false);
+      esp_task_wdt_reset();
+      count1 = sensors1.getDeviceCount();
+      count2 = sensors2.getDeviceCount();
+      noteLoopStage("temp");
+    }
     int totalCount = count1 + count2;
     
     if (totalCount > 0) {
@@ -1325,6 +1413,7 @@ bool connectToWiFi() {
     
     while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
       unsigned long now = millis();
+      servicePumpBootWindow();
       // Неблокирующая задержка 1 секунда с yield()
       if (now - lastCheckTime >= 1000 || now < lastCheckTime) {
         lastCheckTime = now;
@@ -1361,6 +1450,7 @@ bool connectToWiFi() {
     
     while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
       unsigned long now = millis();
+      servicePumpBootWindow();
       // Неблокирующая задержка 1 секунда с yield()
       if (now - lastCheckTime >= 1000 || now < lastCheckTime) {
         lastCheckTime = now;
@@ -2489,7 +2579,13 @@ void applySystemEnable(bool enable, const char* source) {
   
   saveSystemEnabledToEEPROM();
   
-  if (needCoast || (isSupplyTempValid() && supplyTemp >= PUMP_RISE_GUARD_MIN_TEMP && getTemperatureTrend(&supplyHistory) != 0)) {
+  // Погас, уголь, таймаут, срыв розжига — вентилятор стоп, насосы остаются.
+  if (isFaultStopState()) {
+    pumpCoastActive = false;
+    pumpCoastStartTime = 0;
+    pumpStableSince = 0;
+    applyPumpCircuitOutputs(true, false);
+  } else if (needCoast || (isSupplyTempValid() && supplyTemp >= PUMP_RISE_GUARD_MIN_TEMP && getTemperatureTrend(&supplyHistory) != 0)) {
     startPumpCoast(src);
   } else {
     pumpCoastActive = false;
@@ -2640,6 +2736,10 @@ void updatePumpLogic(unsigned long now) {
     }
   }
   
+  if (isFaultStopState()) {
+    shouldPumpRun = true;
+  }
+
   if (shouldPumpRun) {
     if (!pumpState && !pump2State) {
       lastPumpRunTime = now;
@@ -3361,11 +3461,11 @@ void writeActuatorGpios() {
 
   if (!manualPumpControl) {
     int pumpLevel = pumpState ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
-    digitalWrite(PIN_RELAY_PUMP, pumpLevel);
+    drivePumpPin(PIN_RELAY_PUMP, pumpLevel);
   }
   if (!manualPump2Control) {
     int pump2Level = pump2State ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
-    digitalWrite(PIN_RELAY_PUMP2, pump2Level);
+    drivePumpPin(PIN_RELAY_PUMP2, pump2Level);
   }
 }
 
@@ -3397,7 +3497,7 @@ void setPumpDesired(bool on) {
   }
   pumpState = on;
   int pumpLevel = pumpState ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
-  digitalWrite(PIN_RELAY_PUMP, pumpLevel);
+  drivePumpPin(PIN_RELAY_PUMP, pumpLevel);
   logEvent("PUMP", on ? "Насос 1 вкл" : "Насос 1 выкл");
 }
 
@@ -3410,7 +3510,7 @@ void setPump2Desired(bool on) {
   }
   pump2State = on;
   int pump2Level = pump2State ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
-  digitalWrite(PIN_RELAY_PUMP2, pump2Level);
+  drivePumpPin(PIN_RELAY_PUMP2, pump2Level);
   logEvent("PUMP", on ? "Насос 2 вкл" : "Насос 2 выкл");
 }
 
@@ -3480,12 +3580,6 @@ void applyPumpCircuitOutputs(bool demand, bool forceSafety) {
     return;
   }
 
-  // Включение после brownout — отложить в loop (не из HTTP/MQTT)
-  if (pumpOutputsHoldUntilMs != 0 && now < pumpOutputsHoldUntilMs) {
-    queuePumpCircuitApply(demand, forceSafety);
-    return;
-  }
-
   // Оба насоса с OFF → ON: сначала контур 1, контур 2 через PUMP2_STAGGER_MS (меньше просадки питания)
   if (want1 && !was1 && want2 && !was2) {
     setPumpDesired(true);
@@ -3495,10 +3589,9 @@ void applyPumpCircuitOutputs(bool demand, bool forceSafety) {
     return;
   }
 
+  // Срок уже назначен. Сдвигать его здесь нельзя: updatePumpLogic зовёт это каждый круг,
+  // и насос 2 тогда не включается никогда.
   if (pump2StaggerPending && want2 && !was2 && was1) {
-    pump2StaggerPending = true;
-    pump2StaggerTargetOn = true;
-    pump2StaggerAtMs = now + PUMP2_STAGGER_MS;
     setPumpDesired(want1);
     return;
   }
@@ -3558,11 +3651,11 @@ void syncRelays() {
     digitalWrite(PIN_RELAY_FAN, fanLevel);
     if (!manualPumpControl) {
       int pumpLevel = pumpState ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
-      digitalWrite(PIN_RELAY_PUMP, pumpLevel);
+      drivePumpPin(PIN_RELAY_PUMP, pumpLevel);
     }
     if (!manualPump2Control) {
       int pump2Level = pump2State ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
-      digitalWrite(PIN_RELAY_PUMP2, pump2Level);
+      drivePumpPin(PIN_RELAY_PUMP2, pump2Level);
     }
   }
 }
@@ -4229,7 +4322,7 @@ void handleControl() {
         lastManualControlTime = millis();
         pumpState = state;
         int pumpLevel = state ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
-        digitalWrite(PIN_RELAY_PUMP, pumpLevel);
+        drivePumpPin(PIN_RELAY_PUMP, pumpLevel);
         KLog.print("[Инженерное] Насос1: ");
       } else {
         manualPumpControl = false;
@@ -4243,7 +4336,7 @@ void handleControl() {
         lastManualControlTime = millis();
         pump2State = state;
         int pump2Level = state ? HIGH : (relaySettings.pumpOffIsLow ? LOW : HIGH);
-        digitalWrite(PIN_RELAY_PUMP2, pump2Level);
+        drivePumpPin(PIN_RELAY_PUMP2, pump2Level);
         KLog.print("[Инженерное] Насос2: ");
       } else {
         manualPump2Control = false;
@@ -5444,13 +5537,23 @@ void loadOtaResult() {
   strncpy(otaResult.toVersion, to.c_str(), sizeof(otaResult.toVersion) - 1);
   strncpy(otaResult.message, msg.c_str(), sizeof(otaResult.message) - 1);
 
-  // Обновление началось, но SUCCESS не записали — считаем ошибкой
+  // PENDING без живого слота PENDING_VERIFY — загрузка оборвалась и слот не переключился.
+  // Если слот ждёт подтверждения, это первая загрузка новой прошивки: ошибкой не помечаем.
   if (otaResult.status == OTA_RES_PENDING) {
-    saveOtaResult(OTA_RES_FAIL,
-                  otaResult.fromVersion,
-                  otaResult.toVersion,
-                  "Прервано во время обновления");
-    KLog.println("[Update] PENDING → FAIL after reboot");
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    esp_ota_img_states_t otaState;
+    bool awaitingConfirm = running &&
+      esp_ota_get_state_partition(running, &otaState) == ESP_OK &&
+      otaState == ESP_OTA_IMG_PENDING_VERIFY;
+    if (!awaitingConfirm) {
+      saveOtaResult(OTA_RES_FAIL,
+                    otaResult.fromVersion,
+                    otaResult.toVersion,
+                    "Прервано во время обновления");
+      KLog.println("[Update] PENDING → FAIL after reboot");
+    } else {
+      KLog.println("[Update] PENDING, ждём подтверждения слота");
+    }
   }
 
   KLog.print("[Update] Loaded OTA result status=");
@@ -5478,6 +5581,174 @@ void handleUpdateAck() {
   server.send(200, "application/json", response);
 }
 
+static bool parseVer3(const char* s, int& maj, int& min, int& pat) {
+  maj = min = pat = -1;
+  if (!s) return false;
+  int n = sscanf(s, "%d.%d.%d", &maj, &min, &pat);
+  return n == 3 && maj >= 0 && min >= 0 && pat >= 0;
+}
+
+// Строго новее. Пустая, кривая или более старая строка обновлением не считается.
+bool isNewerVersion(const String& remote, const String& current) {
+  int rMaj, rMin, rPat, cMaj, cMin, cPat;
+  if (!parseVer3(remote.c_str(), rMaj, rMin, rPat)) return false;
+  if (!parseVer3(current.c_str(), cMaj, cMin, cPat)) return false;
+  if (rMaj != cMaj) return rMaj > cMaj;
+  if (rMin != cMin) return rMin > cMin;
+  return rPat > cPat;
+}
+
+// Отдельный namespace: clearOtaResult() чистит "ota" и не должен стирать этот флаг.
+void rememberSpiffsPending(const String& ver) {
+  Preferences spiffsPrefs;
+  if (spiffsPrefs.begin("otafs", false)) {
+    spiffsPrefs.putString("spiffs", ver);
+    spiffsPrefs.end();
+  }
+}
+
+void clearSpiffsPending() {
+  Preferences spiffsPrefs;
+  if (spiffsPrefs.begin("otafs", false)) {
+    spiffsPrefs.remove("spiffs");
+    spiffsPrefs.end();
+  }
+}
+
+// Слот остаётся PENDING_VERIFY, пока нет Wi-Fi и насосов (или оба контура явно выключены).
+// Любая перезагрузка до этой отметки откатывает загрузчик на прошлую прошивку.
+void confirmOtaIfHealthy() {
+  static bool decided = false;
+  if (decided) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+  bool bothCircuitsOff = !circuit1Enabled && !circuit2Enabled;
+  if (!(pumpState || pump2State || bothCircuitsOff)) return;
+
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  esp_ota_img_states_t otaState;
+  if (!running || esp_ota_get_state_partition(running, &otaState) != ESP_OK) {
+    decided = true;
+    return;
+  }
+  if (otaState != ESP_OTA_IMG_PENDING_VERIFY) {
+    decided = true;
+    return;
+  }
+  if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+    logEvent("OTA", "подтверждена");
+    saveOtaResult(OTA_RES_SUCCESS, otaResult.fromVersion, FIRMWARE_VERSION, "Подтверждена после Wi-Fi и насосов");
+    decided = true;
+    KLog.println("[Update] OTA slot marked valid");
+  }
+}
+
+bool downloadSpiffsFromGithub() {
+  WiFiClientSecure client;
+  HTTPClient http;
+  client.setInsecure();
+  client.setTimeout(30000);
+  if (!http.begin(client, GITHUB_SPIFFS_URL)) {
+    return false;
+  }
+  http.setTimeout(30000);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  int httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    http.end();
+    return false;
+  }
+  int contentLength = http.getSize();
+  if (contentLength <= 0 || contentLength > 0x160000) {
+    http.end();
+    return false;
+  }
+  if (!Update.begin(contentLength, U_SPIFFS)) {
+    http.end();
+    return false;
+  }
+  WiFiClient* stream = http.getStreamPtr();
+  size_t written = 0;
+  uint8_t buff[512];
+  unsigned long lastDataTime = millis();
+  const unsigned long DATA_TIMEOUT = 60000;
+  while (http.connected() && written < (size_t)contentLength) {
+    esp_task_wdt_reset();
+    size_t available = stream->available();
+    if (available) {
+      int c = stream->readBytes(buff, available > sizeof(buff) ? sizeof(buff) : available);
+      if (c > 0) {
+        if (Update.write(buff, c) != (size_t)c) {
+          Update.abort();
+          http.end();
+          return false;
+        }
+        written += (size_t)c;
+        lastDataTime = millis();
+      }
+    } else {
+      unsigned long now = millis();
+      unsigned long timeSinceData = (now >= lastDataTime) ? (now - lastDataTime) : (ULONG_MAX - lastDataTime + now);
+      if (timeSinceData > DATA_TIMEOUT) {
+        Update.abort();
+        http.end();
+        return false;
+      }
+      delay(10);
+    }
+    yield();
+  }
+  http.end();
+  if (written < (size_t)contentLength) {
+    Update.abort();
+    return false;
+  }
+  return Update.end();
+}
+
+// Один раз после подтверждения приложения. Сбой SPIFFS флаг снимает и отопление не блокирует.
+void servicePendingSpiffs() {
+  static bool done = false;
+  if (done) return;
+  if (millis() < 20000UL) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (updateProgress.isUpdating) return;
+
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  esp_ota_img_states_t otaState;
+  if (running && esp_ota_get_state_partition(running, &otaState) == ESP_OK &&
+      otaState == ESP_OTA_IMG_PENDING_VERIFY) {
+    return;
+  }
+
+  Preferences spiffsPrefs;
+  if (!spiffsPrefs.begin("otafs", true)) {
+    done = true;
+    return;
+  }
+  String ver = spiffsPrefs.getString("spiffs", "");
+  spiffsPrefs.end();
+  if (ver.length() == 0 || ver != String(FIRMWARE_VERSION)) {
+    if (ver.length() > 0) clearSpiffsPending();
+    done = true;
+    return;
+  }
+
+  KLog.println("[Update] SPIFFS after confirmed app");
+  bool ok = downloadSpiffsFromGithub();
+  clearSpiffsPending();
+  done = true;
+  if (ok) {
+    logEvent("OTA", "SPIFFS записан");
+    delay(300);
+    ESP.restart();
+  } else {
+    logEvent("OTA", "SPIFFS пропущен");
+  }
+}
+
+// 0 = ещё не проверяли, 1 = есть новее, 2 = уже актуальная, 3 = ошибка связи
+static int gUpdateCheckKind = 0;
+
 // Проверка обновлений через GitHub
 String checkForUpdates() {
   // Проверяем WiFi соединение
@@ -5485,6 +5756,7 @@ String checkForUpdates() {
     KLog.println("[Update] ERROR: WiFi not connected!");
     KLog.print("[Update] WiFi status: ");
     KLog.println(WiFi.status());
+    gUpdateCheckKind = 3;
     return "";
   }
   
@@ -5510,6 +5782,7 @@ String checkForUpdates() {
     KLog.println("[Update]   - DNS resolution failed");
     KLog.println("[Update]   - Invalid URL");
     KLog.println("[Update]   - Memory issue");
+    gUpdateCheckKind = 3;
     return "";
   }
   
@@ -5545,6 +5818,7 @@ String checkForUpdates() {
     if (version.length() == 0) {
       KLog.println("[Update] WARNING: Received empty version string");
       http.end();
+      gUpdateCheckKind = 3;
       return "";
     }
     
@@ -5553,17 +5827,19 @@ String checkForUpdates() {
       KLog.println("[Update] WARNING: Version format seems invalid");
     }
     
-    // Сравнение версий (простое строковое сравнение)
-    if (version != String(FIRMWARE_VERSION)) {
+    // Только строго более новая версия. Иначе GitHub 4.2.42 предлагается поверх 4.2.43.
+    if (isNewerVersion(version, String(FIRMWARE_VERSION))) {
       KLog.print("[Update] ✓ New version available: ");
       KLog.print(version);
       KLog.print(" (current: ");
       KLog.print(FIRMWARE_VERSION);
       KLog.println(")");
       http.end();
+      gUpdateCheckKind = 1;
       return version;  // Есть новая версия
     } else {
       KLog.println("[Update] ✓ Already on latest version");
+      gUpdateCheckKind = 2;
     }
   } else {
     KLog.print("[Update] ✗ ERROR: HTTP code ");
@@ -5610,6 +5886,7 @@ String checkForUpdates() {
   
   http.end();
   KLog.println("[Update] HTTP connection closed");
+  if (gUpdateCheckKind != 2) gUpdateCheckKind = 3;
   return "";  // Нет обновлений или ошибка
 }
 
@@ -5619,6 +5896,12 @@ bool downloadAndInstallUpdate(String version) {
   HTTPClient http;
   
   KLog.println("[Update] Starting update download...");
+  if (!isNewerVersion(version, String(FIRMWARE_VERSION))) {
+    updateProgress.isUpdating = false;
+    updateProgress.message = "Отказ: версия не новее";
+    saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
+    return false;
+  }
   saveOtaResult(OTA_RES_PENDING, FIRMWARE_VERSION, version.c_str(), "Идёт обновление...");
   
   // Инициализация прогресса обновления
@@ -5628,9 +5911,7 @@ bool downloadAndInstallUpdate(String version) {
   updateProgress.message = "Загрузка прошивки...";
   updateProgress.startTime = millis();
   
-  // Отключаем watchdog на время загрузки, чтобы избежать перезагрузки
-  KLog.println("[Update] Disabling watchdog timer during download...");
-  esp_task_wdt_delete(NULL);  // Удаляем текущую задачу из watchdog
+  // Watchdog не снимаем: обрыв загрузки должен перезагрузить старую прошивку, а не зависнуть.
   
   // Отключаем проверку сертификата для упрощения
   client.setInsecure();
@@ -5644,7 +5925,6 @@ bool downloadAndInstallUpdate(String version) {
     KLog.println("[Update] Failed to connect to GitHub for firmware");
     updateProgress.message = "Нет связи с GitHub";
     saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
-    esp_task_wdt_add(NULL);
     return false;
   }
   
@@ -5668,7 +5948,6 @@ bool downloadAndInstallUpdate(String version) {
         updateProgress.message = "Прошивка больше OTA-слота";
         saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
         http.end();
-        esp_task_wdt_add(NULL);
         return false;
       }
       // Начинаем обновление прошивки
@@ -5677,7 +5956,6 @@ bool downloadAndInstallUpdate(String version) {
         updateProgress.message = "Недостаточно места во flash";
         saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
         http.end();
-        esp_task_wdt_add(NULL);
         return false;
       }
       
@@ -5696,6 +5974,7 @@ bool downloadAndInstallUpdate(String version) {
       KLog.println("[Update] Starting firmware download...");
       
       while (http.connected() && (written < contentLength)) {
+        esp_task_wdt_reset();
         size_t available = stream->available();
         
         if (available) {
@@ -5711,7 +5990,6 @@ bool downloadAndInstallUpdate(String version) {
               updateProgress.message = "Ошибка записи прошивки";
               saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
               http.end();
-              esp_task_wdt_add(NULL);
               return false;
             }
             written += c;
@@ -5771,7 +6049,6 @@ bool downloadAndInstallUpdate(String version) {
             updateProgress.message = "Таймаут загрузки прошивки";
             saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
             http.end();
-            esp_task_wdt_add(NULL);
             return false;
           }
         }
@@ -5790,7 +6067,6 @@ bool downloadAndInstallUpdate(String version) {
         updateProgress.message = "Загрузка прошивки неполная";
         saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
         http.end();
-        esp_task_wdt_add(NULL);
         return false;
       }
       
@@ -5805,11 +6081,14 @@ bool downloadAndInstallUpdate(String version) {
         updateProgress.message = String("Финал прошивки: ") + Update.errorString();
         saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
         http.end();
-        esp_task_wdt_add(NULL);
         return false;
       }
       
       KLog.println("[Update] Firmware update complete!");
+    } else {
+      KLog.println("[Update] Empty firmware");
+      updateProgress.message = "Пустой файл прошивки";
+      success = false;
     }
   } else {
     KLog.print("[Update] Error downloading firmware: ");
@@ -5819,185 +6098,27 @@ bool downloadAndInstallUpdate(String version) {
   
   http.end();
   
-  // 2. Загружаем SPIFFS (если доступен)
-  if (success) {
-    KLog.println("[Update] Step 2: Downloading SPIFFS...");
-    delay(1000);  // Небольшая пауза между загрузками
-    
-    if (!http.begin(client, GITHUB_SPIFFS_URL)) {
-      KLog.println("[Update] Warning: Failed to connect to GitHub for SPIFFS, continuing...");
-      // SPIFFS не критичен, продолжаем
-    } else {
-      http.setTimeout(30000);
-      http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-      
-      httpCode = http.GET();
-      
-      if (httpCode == HTTP_CODE_OK) {
-        int contentLength = http.getSize();
-        KLog.print("[Update] SPIFFS size: ");
-        KLog.print(contentLength);
-        KLog.println(" bytes");
-        
-        if (contentLength > 0) {
-          // Начинаем обновление SPIFFS
-          if (!Update.begin(contentLength, U_SPIFFS)) {
-            KLog.println("[Update] Warning: Not enough space for SPIFFS update, continuing...");
-            // SPIFFS не критичен, продолжаем
-          } else {
-            // Обновляем информацию о размере файла для SPIFFS
-            updateProgress.totalBytes = contentLength;
-            updateProgress.bytesDownloaded = 0;
-            updateProgress.percent = 0;
-            
-            WiFiClient* stream = http.getStreamPtr();
-            size_t written = 0;
-            uint8_t buff[512] = { 0 };  // Увеличен буфер с 128 до 512 байт
-            unsigned long lastProgressUpdate = 0;
-            unsigned long lastDataTime = millis();  // Время последнего получения данных
-            const unsigned long DATA_TIMEOUT = 60000;  // 60 секунд таймаут без данных
-            
-            KLog.println("[Update] Starting SPIFFS download...");
-            updateProgress.stage = "spiffs";
-            updateProgress.message = "Загрузка файловой системы...";
-            
-            while (http.connected() && (written < contentLength)) {
-              size_t available = stream->available();
-              
-              if (available) {
-                int c = stream->readBytes(buff, ((available > sizeof(buff)) ? sizeof(buff) : available));
-                if (c > 0) {
-                  size_t writtenBytes = Update.write(buff, c);
-                  if (writtenBytes != c) {
-                    KLog.print("[Update] ERROR: SPIFFS write mismatch! Expected ");
-                    KLog.print(c);
-                    KLog.print(", wrote ");
-                    KLog.println(writtenBytes);
-                    Update.abort();
-                    http.end();
-                    // Прошивка уже обновлена, продолжаем
-                    break;
-                  }
-                  written += c;
-                  updateProgress.bytesDownloaded = written;
-                  lastDataTime = millis();
-                  
-                  // Прогресс на дисплее (каждые 5%)
-                  unsigned long now = millis();
-                  int percent = (written * 100) / contentLength;
-                  
-                  // Вычисляем скорость загрузки
-                  if (updateProgress.startTime > 0 && written > 0) {
-                    unsigned long elapsed = now - updateProgress.startTime;
-                    if (elapsed > 0) {
-                      updateProgress.speedKBps = (written / 1024.0) / (elapsed / 1000.0);
-                    }
-                  }
-                  
-                  // Обновляем глобальный прогресс (каждую секунду или при изменении на 1%)
-                  if (now - lastProgressUpdate > 1000 || percent != updateProgress.percent) {
-                    updateProgress.percent = percent;
-                    updateProgress.stage = "spiffs";
-                    updateProgress.message = "Загрузка файловой системы...";
-                    
-                    if (percent % 5 == 0 || lastProgressUpdate == 0) {
-                      u8g2.clearBuffer();
-                      u8g2.setFont(u8g2_font_ncenB10_tr);
-                      u8g2.drawStr(0, 20, "FS Download...");
-                      char progressStr[20];
-                      snprintf(progressStr, sizeof(progressStr), "%d%%", percent);
-                      u8g2.drawStr(0, 40, progressStr);
-                      u8g2.sendBuffer();
-                      lastProgressUpdate = now;
-                      KLog.print("[Update] SPIFFS progress: ");
-                      KLog.print(percent);
-                      KLog.print("% (");
-                      KLog.print(written);
-                      KLog.print("/");
-                      KLog.print(contentLength);
-                      KLog.print(" bytes, ");
-                      KLog.print(updateProgress.speedKBps, 1);
-                      KLog.println(" KB/s)");
-                    }
-                  }
-                }
-              } else {
-                // Проверка таймаута
-                unsigned long now = millis();
-                unsigned long timeSinceData = (now >= lastDataTime) ? (now - lastDataTime) : (ULONG_MAX - lastDataTime + now);
-                
-                if (timeSinceData > DATA_TIMEOUT) {
-                  KLog.println("[Update] WARNING: SPIFFS download timeout! Aborting SPIFFS update.");
-                  KLog.print("[Update] Last data received ");
-                  KLog.print(timeSinceData / 1000);
-                  KLog.println(" seconds ago");
-                  Update.abort();
-                  http.end();
-                  // Прошивка уже обновлена, продолжаем без SPIFFS
-                  break;
-                }
-              }
-              
-              yield();
-            }
-            
-            // Проверка: загружены ли все данные SPIFFS?
-            if (written < contentLength) {
-              KLog.print("[Update] WARNING: SPIFFS download incomplete! Expected ");
-              KLog.print(contentLength);
-              KLog.print(" bytes, got ");
-              KLog.print(written);
-              KLog.println(" bytes");
-              Update.abort();
-              http.end();
-              // Прошивка уже обновлена, продолжаем без SPIFFS
-            } else {
-              KLog.println("[Update] SPIFFS download complete, finalizing...");
-              KLog.print("[Update] Total SPIFFS bytes written: ");
-              KLog.println(written);
-              
-              if (Update.end()) {
-                KLog.println("[Update] SPIFFS update complete!");
-              } else {
-                KLog.println("[Update] WARNING: SPIFFS update failed during finalization!");
-                KLog.print("[Update] Error: ");
-                KLog.println(Update.errorString());
-                // Прошивка уже обновлена, продолжаем без SPIFFS
-              }
-            }
-          }
-        }
-      } else {
-        KLog.print("[Update] Warning: SPIFFS not available (HTTP ");
-        KLog.print(httpCode);
-        KLog.println("), continuing with firmware only...");
-      }
-      
-      http.end();
-    }
-  }
-  
-  if (success) {
-    KLog.println("[Update] All updates complete! Rebooting...");
-    saveOtaResult(OTA_RES_SUCCESS, FIRMWARE_VERSION, version.c_str(), "Обновление установлено");
-    updateProgress.percent = 100;
-    updateProgress.message = "Обновление завершено! Перезагрузка...";
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_ncenB10_tr);
-    u8g2.drawStr(0, 30, "Update Done!");
-    u8g2.sendBuffer();
-    delay(1000);
-    // Watchdog не возвращаем, т.к. устройство перезагрузится
-    return true;
-  } else {
+  if (!success) {
     updateProgress.isUpdating = false;
     if (updateProgress.message.length() == 0) {
       updateProgress.message = "Ошибка обновления";
     }
     saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
-    esp_task_wdt_add(NULL);  // Возвращаем watchdog обратно
     return false;
   }
+
+  // Слот уже переключён Update.end(), но образ ещё PENDING_VERIFY.
+  // SPIFFS качаем только после того, как новая прошивка подтвердит Wi-Fi и насосы.
+  rememberSpiffsPending(version);
+  saveOtaResult(OTA_RES_PENDING, FIRMWARE_VERSION, version.c_str(), "Записано, ждём подтверждения");
+  updateProgress.percent = 100;
+  updateProgress.message = "Прошивка записана, перезагрузка...";
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_ncenB10_tr);
+  u8g2.drawStr(0, 30, "FW saved");
+  u8g2.sendBuffer();
+  delay(500);
+  return true;
 }
 
 // API: Проверка обновлений
@@ -6025,8 +6146,8 @@ void handleUpdateCheck() {
   doc["latestVersion"] = latestVersion.length() > 0 ? latestVersion : String(FIRMWARE_VERSION);
   doc["updateAvailable"] = (latestVersion.length() > 0);
   
-  // Добавляем информацию об ошибке, если версия пустая
-  if (latestVersion.length() == 0) {
+  // Пустой ответ при уже актуальной версии — не ошибка. Ошибка только если проверка не удалась.
+  if (latestVersion.length() == 0 && gUpdateCheckKind == 3) {
     doc["error"] = "Could not check for updates. Check serial output for details.";
     doc["wifiStatus"] = (WiFi.status() == WL_CONNECTED) ? "connected" : "disconnected";
   }
@@ -6589,6 +6710,7 @@ void setupOTA() {
   
   // Обработчик прогресса обновления
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    esp_task_wdt_reset();
     int percent = (progress / (total / 100));
     
     // Обновление дисплея с прогрессом
@@ -6658,14 +6780,27 @@ void handleCoalFeeding() {
   }
 }
 
+char bootPrevStage[16] = "boot";
+
 void setup() {
+  // Сохранить этап до bootEnergize: тот вызов перезаписывает RTC-метку
+  strncpy(bootPrevStage, rtcLoopStage, sizeof(bootPrevStage) - 1);
+  bootPrevStage[sizeof(bootPrevStage) - 1] = '\0';
+  // Насосы раньше Serial, Wi-Fi и любой паузы. На время сброса реле и так отпущено.
+  bootEnergizePumps();
   Serial.begin(115200);
-  delay(500);  // Уменьшена задержка для быстрого старта
-  
+
   // Инициализация Watchdog Timer для обнаружения зависаний
   // Таймаут: 30 секунд (если loop() не выполнится за это время, ESP32 перезагрузится)
   esp_task_wdt_init(30, true);  // 30 секунд, enable panic handler
   esp_task_wdt_add(NULL);  // Добавляем текущую задачу (loop) в watchdog
+  {
+    unsigned long warmup = millis();
+    while (millis() - warmup < 500) {
+      servicePumpBootWindow();
+      yield();
+    }
+  }
   
   KLog.println("[DIAG] Watchdog timer initialized (30s timeout)");
   KLog.print("[DIAG] Free heap at startup: ");
@@ -6679,10 +6814,8 @@ void setup() {
   pinMode(PIN_RELAY_PUMP, OUTPUT);
   pinMode(PIN_RELAY_PUMP2, OUTPUT);
   pinMode(PIN_RELAY_SENSORS, OUTPUT);
-  // Выключено = LOW, включено = HIGH
+  // Насосы уже включены в bootEnergizePumps(). Здесь их не гасим.
   digitalWrite(PIN_RELAY_FAN, LOW);
-  digitalWrite(PIN_RELAY_PUMP, LOW);
-  digitalWrite(PIN_RELAY_PUMP2, LOW);
   // Реле датчиков по умолчанию включено (питание датчиков)
   sensorsRelayState = true;
   digitalWrite(PIN_RELAY_SENSORS, HIGH);
@@ -6749,11 +6882,10 @@ void setup() {
   KLog.println(lastResetReason);
   KLog.print("[Boot] Boot count: ");
   KLog.println(bootCount);
-  if (lastResetReason.indexOf("Просадка") >= 0 || lastResetReason.indexOf("WDT") >= 0 ||
-      lastResetReason.indexOf("Паника") >= 0) {
-    pumpOutputsHoldUntilMs = millis() + PUMP_BOOT_HOLD_BROWNOUT_MS;
-    KLog.println("[Boot] Пауза включения насосов после сбоя питания/CPU");
-  }
+  // После WDT/паники/просадки насосы не откладываем: циркуляция важнее паузы на пусковой ток.
+  pumpOutputsHoldUntilMs = 0;
+  KLog.print("[Boot] Прошлый этап цикла: ");
+  KLog.println(rtcLoopStage);
   
   // Загрузка настроек из EEPROM
   loadAutoSettingsFromEEPROM();
@@ -6778,8 +6910,12 @@ void setup() {
   // Определение состояния системы при запуске (всегда рабочий режим после питания)
   determineSystemStateOnStartup();
   
-  char bootDetails[48];
-  snprintf(bootDetails, sizeof(bootDetails), "reason=%s #%lu", lastResetReason.c_str(), (unsigned long)bootCount);
+  loadRelaySettingsFromEEPROM();
+  applyBootCircuitsFromSettings();
+  noteLoopStage("eeprom");
+
+  char bootDetails[49];
+  snprintf(bootDetails, sizeof(bootDetails), "reason=%s #%lu @%s", lastResetReason.c_str(), (unsigned long)bootCount, bootPrevStage);
   logEvent("BOOT", bootDetails);
   
   // Попытка подключения к WiFi с приоритетом
@@ -6787,6 +6923,7 @@ void setup() {
   
   // Если есть сохраненные настройки WiFi, используем их
   if (wifiSettings.primarySSID.length() > 0 || wifiSettings.backupSSID.length() > 0) {
+    noteLoopStage("wifi");
     wifiConnected = connectToWiFi();
   }
   
@@ -6874,10 +7011,12 @@ void setup() {
   }, []() {
     HTTPUpload& upload = server.upload();
     if (upload.status == UPLOAD_FILE_START) {
+      esp_task_wdt_reset();
       if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
         Update.printError(Serial);
       }
     } else if (upload.status == UPLOAD_FILE_WRITE) {
+      esp_task_wdt_reset();
       if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
         Update.printError(Serial);
       }
@@ -6957,6 +7096,8 @@ void setup() {
   
   // Первоначальное обновление дисплея
   updateDisplay();
+  noteLoopStage("ready");
+  confirmOtaIfHealthy();
 }
 
 void loop() {
@@ -6968,6 +7109,8 @@ void loop() {
   
   // Watchdog timer - сбрасываем каждый цикл для обнаружения зависаний
   esp_task_wdt_reset();
+  confirmOtaIfHealthy();
+  servicePendingSpiffs();
   
   // Heartbeat - счетчик итераций loop() для диагностики
   static unsigned long heartbeatCounter = 0;
@@ -7015,6 +7158,7 @@ void loop() {
     }
   }
   
+  noteLoopStage("http");
   server.handleClient();
   
   // Отложенная запись журнала событий (FAN_ON/OFF)
@@ -7315,6 +7459,7 @@ void loop() {
   }
   
   // Автоматическое управление насосом (вкл/выкл + выбег + защита по росту подачи)
+  noteLoopStage("pump");
   updatePumpLogic(now);
   
   // Синхронизация состояния реле с переменными (важно для надежности)
@@ -7348,6 +7493,7 @@ void loop() {
   static unsigned long lastTempUpdate = 0;
   if (now - lastTempUpdate > 3000 || now < lastTempUpdate) {
     lastTempUpdate = now;
+    noteLoopStage("temp");
     updateTemperatures();
   }
   
