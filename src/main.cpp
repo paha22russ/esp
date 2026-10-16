@@ -56,7 +56,7 @@ extern "C" bool verifyRollbackLater() { return true; }
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.49"
+#define FIRMWARE_VERSION "4.2.50"
 #define DISCOVERY_UDP_PORT 4210
 #define DISCOVERY_BEACON_INTERVAL_MS 1000
 
@@ -1532,7 +1532,8 @@ bool connectToWiFi() {
           KLog.println("]");
         }
       }
-      yield(); // Позволяем другим задачам выполняться
+      yield();
+      esp_task_wdt_reset();
     }
     
     if (WiFi.status() == WL_CONNECTED) {
@@ -1561,7 +1562,8 @@ bool connectToWiFi() {
         KLog.print(".");
         attempts++;
       }
-      yield(); // Позволяем другим задачам выполняться
+      yield();
+      esp_task_wdt_reset();
     }
     
     if (WiFi.status() == WL_CONNECTED) {
@@ -2669,7 +2671,8 @@ void setupNTP() {
       attempts++;
       KLog.print(".");
     }
-    yield(); // Позволяем другим задачам выполняться
+    yield();
+    esp_task_wdt_reset();
   }
   
   if (timeClient.update()) {
@@ -7302,8 +7305,8 @@ void setup() {
   Serial.begin(115200);
 
   // Инициализация Watchdog Timer для обнаружения зависаний
-  // Таймаут: 30 секунд (если loop() не выполнится за это время, ESP32 перезагрузится)
-  esp_task_wdt_init(30, true);  // 30 секунд, enable panic handler
+  // Таймаут: 120 секунд. Короткий сброс на старте откатывал OTA, не дождавшись Wi-Fi.
+  esp_task_wdt_init(120, true);  // 120 секунд, enable panic handler
   esp_task_wdt_add(NULL);  // Добавляем текущую задачу (loop) в watchdog
   {
     unsigned long warmup = millis();
@@ -7313,7 +7316,7 @@ void setup() {
     }
   }
   
-  KLog.println("[DIAG] Watchdog timer initialized (30s timeout)");
+  KLog.println("[DIAG] Watchdog timer initialized (120s timeout)");
   KLog.print("[DIAG] Free heap at startup: ");
   KLog.print(ESP.getFreeHeap());
   KLog.println(" bytes");
@@ -7412,6 +7415,7 @@ void setup() {
   loadOtaResult();
   
   // SPIFFS до журнала событий и startup (events.log на файловой системе)
+  esp_task_wdt_reset();
   if (!SPIFFS.begin(true)) {
     KLog.println("[ОШИБКА] SPIFFS не смонтирован!");
   } else {
@@ -7446,7 +7450,7 @@ void setup() {
   
   // Если не подключились, используем WiFiManager
   if (!wifiConnected) {
-    wifiManager.setConfigPortalTimeout(180);
+    wifiManager.setConfigPortalTimeout(100);
     
     if (!wifiManager.autoConnect("KotelAP", "kotel12345")) {
       // PENDING_VERIFY: рестарт = откат. Остаёмся без STA, отопление важнее Wi‑Fi.
