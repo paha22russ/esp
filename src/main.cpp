@@ -56,7 +56,7 @@ extern "C" bool verifyRollbackLater() { return true; }
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.46"
+#define FIRMWARE_VERSION "4.2.49"
 #define DISCOVERY_UDP_PORT 4210
 #define DISCOVERY_BEACON_INTERVAL_MS 1000
 
@@ -178,6 +178,8 @@ const unsigned long PUMP_COAST_MIN_MS = 2UL * 60UL * 1000UL;   // минимум
 const unsigned long PUMP_COAST_MAX_MS = 45UL * 60UL * 1000UL;  // максимум 45 мин
 const unsigned long PUMP_STABLE_HOLD_MS = 3UL * 60UL * 1000UL; // стабильный тренд держать 3 мин
 const float PUMP_RISE_GUARD_MIN_TEMP = 30.0;  // защита по росту подачи выше этой t°
+const float PUMP_FROST_OUTDOOR_C = -5.0f;     // насосы при простое, если улица ниже этого
+const unsigned long OUTDOOR_SENSOR_STALE_MS = 5UL * 60UL * 1000UL;
 bool systemEnabledMqttPending = false;  // отложенная публикация (не из mqttCallback)
 bool relaySettingsSavePending = false;  // EEPROM.commit нельзя из mqttCallback — откладываем
 bool circuitsMqttPending = false;       // MQTT publish контуров — вне callback / после API
@@ -285,6 +287,11 @@ float ignitionStartTemp = 0.0;  // Температура при начале р
 const unsigned long IGNITION_TIMEOUT_MIN = 10 * 60 * 1000;  // 10 минут в миллисекундах (минимальный таймаут)
 const unsigned long IGNITION_TIMEOUT_MAX = 20 * 60 * 1000;  // 20 минут в миллисекундах (максимальный таймаут)
 const float IGNITION_TEMP_INCREASE = 2.0;  // Минимальное повышение температуры для успешного розжига (°C)
+const float IGNITION_PUMP_TEMP_C = 45.0f;     // насосы при розжиге холодного котла — только с этой температуры
+const unsigned long IGNITION_PUMP2_DELAY_MS = 30000UL;
+bool ignitionPumpHold = false;
+bool ignitionPump1Released = false;
+unsigned long ignitionPump2AtMs = 0;
 
 // Структура для логирования событий
 struct EventLogEntry {
@@ -294,7 +301,7 @@ struct EventLogEntry {
   bool valid;           // Флаг валидности записи
 };
 
-const int EVENT_LOG_MAX_ENTRIES = 80;  // Кольцевой буфер ~80 событий
+const int EVENT_LOG_MAX_ENTRIES = 160;  // кольцо: больше места под сбои, не только вентилятор
 EventLogEntry eventLog[EVENT_LOG_MAX_ENTRIES];
 uint8_t eventLogWriteIndex = 0;  // Индекс для записи следующей записи
 const char* EVENT_LOG_PATH = "/events.log";
@@ -519,6 +526,10 @@ void handleEventsClear();
 void saveFanStatsToEEPROM();
 void loadFanStatsFromEEPROM();
 void startIgnition();
+void armIgnitionPumpHold();
+void clearIgnitionPumpHold();
+void serviceIgnitionPumps(unsigned long now);
+
 void checkBoilerExtinguished(unsigned long now);
 void checkIgnitionProgress(unsigned long now);
 bool isFaultStopState();
@@ -2054,7 +2065,7 @@ void handleEventsGet() {
     eventLogDirty = false;
     lastEventLogFlush = millis();
   }
-  DynamicJsonDocument doc(8192);
+  DynamicJsonDocument doc(49152);
   JsonArray entries = doc.createNestedArray("entries");
   for (int i = 0; i < EVENT_LOG_MAX_ENTRIES; i++) {
     int idx = (eventLogWriteIndex + i) % EVENT_LOG_MAX_ENTRIES;
@@ -2186,16 +2197,12 @@ void saveEventLogToSpiffs() {
     if (!eventLog[idx].valid || eventLog[idx].eventType[0] == '\0') {
       continue;
     }
-    char dt[24] = "---- -- -- --:--:--";
-    if (eventLog[idx].timestamp > 0) {
-      time_t t = eventLog[idx].timestamp;
-      struct tm* timeInfo = localtime(&t);
-      if (timeInfo) {
-        strftime(dt, sizeof(dt), "%Y-%m-%d %H:%M:%S", timeInfo);
-      }
-    }
-    const char* human = eventLog[idx].details[0] ? eventLog[idx].details : eventLog[idx].eventType;
-    f.printf("%s | %s\n", dt, human);
+    const char* human = eventLog[idx].details[0] ? eventLog[idx].details : "";
+    // timestamp и тип сохраняются: после перезагрузки журнал не превращается в «LOG без времени»
+    f.printf("%lu\t%s\t%s\n",
+             (unsigned long)eventLog[idx].timestamp,
+             eventLog[idx].eventType,
+             human);
   }
   f.close();
 }
@@ -2234,6 +2241,20 @@ void loadEventLogFromSpiffs() {
     entry.valid = true;
     if (pipe >= 0) {
       entry.timestamp = 0;
+      String dt = line.substring(0, pipe);
+      dt.trim();
+      if (dt.length() >= 19 && dt.charAt(0) != '-') {
+        struct tm ti = {};
+        ti.tm_isdst = -1;
+        if (sscanf(dt.c_str(), "%d-%d-%d %d:%d:%d",
+                   &ti.tm_year, &ti.tm_mon, &ti.tm_mday,
+                   &ti.tm_hour, &ti.tm_min, &ti.tm_sec) == 6) {
+          ti.tm_year -= 1900;
+          ti.tm_mon -= 1;
+          time_t parsed = mktime(&ti);
+          if (parsed > 0) entry.timestamp = (uint32_t)parsed;
+        }
+      }
       strncpy(entry.eventType, "LOG", sizeof(entry.eventType) - 1);
       entry.eventType[sizeof(entry.eventType) - 1] = '\0';
       String humanPart = line.substring(pipe + 3);
@@ -2256,6 +2277,199 @@ void loadEventLogFromSpiffs() {
   KLog.println("[Event] Journal loaded from SPIFFS");
 }
 
+// График подачи: последние 4 часа на самом котле.
+// Точка раз в минуту живёт в RAM и раз в минуту дописывается в SPIFFS,
+// чтобы перезагрузка и выключенный телефон не стирали историю.
+static const uint16_t CHART_CAP = 240;
+static const uint32_t CHART_STEP_SEC = 60;
+static const uint32_t CHART_WINDOW_SEC = 4UL * 3600UL;
+static const char* CHART_PATH = "/chart.bin";
+struct __attribute__((packed)) ChartSample {
+  uint32_t t;          // unix UTC
+  int16_t supplyX10;
+  int16_t setX10;
+};
+ChartSample chartBuf[CHART_CAP];
+uint16_t chartHead = 0;
+uint16_t chartCount = 0;
+bool chartDirty = false;
+unsigned long lastChartFlush = 0;
+uint32_t lastChartSlot = 0;
+bool chartHasGood = false;
+float chartLastGood = 0.0f;
+bool chartHasPending = false;
+float chartPending = 0.0f;
+uint32_t chartPendingAt = 0;
+
+uint32_t chartUtc() {
+  if (!ntpSettings.enabled || !timeClient.isTimeSet()) {
+    return 0;
+  }
+  timeClient.update();
+  int32_t utc = (int32_t)timeClient.getEpochTime() - (int32_t)ntpSettings.timezone * 3600;
+  if (utc < 1700000000L) {
+    return 0;
+  }
+  return (uint32_t)utc;
+}
+
+void chartPush(uint32_t t, float supply, float setp) {
+  ChartSample sample;
+  sample.t = t;
+  sample.supplyX10 = (int16_t)lroundf(supply * 10.0f);
+  sample.setX10 = (int16_t)lroundf(setp * 10.0f);
+  chartBuf[chartHead] = sample;
+  chartHead = (uint16_t)((chartHead + 1) % CHART_CAP);
+  if (chartCount < CHART_CAP) {
+    chartCount++;
+  }
+  chartDirty = true;
+}
+
+void saveChartToSpiffs() {
+  if (!SPIFFS.begin(false)) {
+    return;
+  }
+  File f = SPIFFS.open(CHART_PATH, FILE_WRITE);
+  if (!f) {
+    return;
+  }
+  uint8_t hdr[8] = {'C', 'H', 'T', '1', 0, 0, 0, 0};
+  memcpy(hdr + 4, &chartCount, sizeof(chartCount));
+  f.write(hdr, sizeof(hdr));
+  for (uint16_t i = 0; i < chartCount; i++) {
+    if ((i & 15) == 0) {
+      esp_task_wdt_reset();
+    }
+    uint16_t idx = (uint16_t)((chartHead + CHART_CAP - chartCount + i) % CHART_CAP);
+    f.write((const uint8_t*)&chartBuf[idx], sizeof(ChartSample));
+  }
+  f.close();
+}
+
+void loadChartFromSpiffs() {
+  chartHead = 0;
+  chartCount = 0;
+  chartDirty = false;
+  chartHasGood = false;
+  chartHasPending = false;
+  lastChartSlot = 0;
+  if (!SPIFFS.exists(CHART_PATH)) {
+    return;
+  }
+  File f = SPIFFS.open(CHART_PATH, FILE_READ);
+  if (!f) {
+    return;
+  }
+  uint8_t hdr[8];
+  if (f.read(hdr, sizeof(hdr)) != sizeof(hdr) || memcmp(hdr, "CHT1", 4) != 0) {
+    f.close();
+    return;
+  }
+  uint16_t count = 0;
+  memcpy(&count, hdr + 4, sizeof(count));
+  if (count > CHART_CAP) {
+    count = CHART_CAP;
+  }
+  for (uint16_t i = 0; i < count; i++) {
+    ChartSample sample;
+    if (f.read((uint8_t*)&sample, sizeof(sample)) != sizeof(sample)) {
+      break;
+    }
+    if (sample.t < 1700000000UL) {
+      continue;
+    }
+    chartBuf[chartHead] = sample;
+    chartHead = (uint16_t)((chartHead + 1) % CHART_CAP);
+    if (chartCount < CHART_CAP) {
+      chartCount++;
+    }
+  }
+  f.close();
+  if (chartCount > 0) {
+    uint16_t last = (uint16_t)((chartHead + CHART_CAP - 1) % CHART_CAP);
+    lastChartSlot = chartBuf[last].t / CHART_STEP_SEC;
+    chartLastGood = chartBuf[last].supplyX10 / 10.0f;
+    chartHasGood = true;
+  }
+  KLog.print("[Chart] loaded ");
+  KLog.println(chartCount);
+}
+
+void serviceChart(unsigned long now) {
+  static unsigned long lastTry = 0;
+  unsigned long since = (lastTry == 0) ? 999999UL :
+    ((now >= lastTry) ? (now - lastTry) : (ULONG_MAX - lastTry + now));
+  if (since >= 5000UL) {
+    lastTry = now;
+    uint32_t utc = chartUtc();
+    if (utc != 0 && isSupplyTempValid()) {
+      uint32_t slot = utc / CHART_STEP_SEC;
+      if (slot != lastChartSlot) {
+        float temp = supplyTemp;
+        bool take = true;
+        if (chartHasGood && fabsf(temp - chartLastGood) > 12.0f) {
+          if (chartHasPending && fabsf(temp - chartPending) <= 3.0f &&
+              utc - chartPendingAt < 180UL) {
+            chartHasPending = false;
+            chartLastGood = temp;
+          } else {
+            chartPending = temp;
+            chartPendingAt = utc;
+            chartHasPending = true;
+            take = false;
+          }
+        } else {
+          chartHasPending = false;
+          chartLastGood = temp;
+          chartHasGood = true;
+        }
+        if (take) {
+          chartPush(utc, temp, setpoint);
+          lastChartSlot = slot;
+        }
+      }
+    }
+  }
+  unsigned long sinceFlush = (lastChartFlush == 0) ? 999999UL :
+    ((now >= lastChartFlush) ? (now - lastChartFlush) : (ULONG_MAX - lastChartFlush + now));
+  if (chartDirty && sinceFlush >= 60000UL) {
+    saveChartToSpiffs();
+    chartDirty = false;
+    lastChartFlush = now;
+  }
+}
+
+void handleHistory() {
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "application/json", "");
+  server.sendContent("{\"step\":60,\"points\":[");
+  uint32_t utc = chartUtc();
+  uint32_t cutoff = (utc > CHART_WINDOW_SEC) ? (utc - CHART_WINDOW_SEC) : 0;
+  bool first = true;
+  char buf[80];
+  for (uint16_t i = 0; i < chartCount; i++) {
+    if ((i & 15) == 0) {
+      esp_task_wdt_reset();
+    }
+    uint16_t idx = (uint16_t)((chartHead + CHART_CAP - chartCount + i) % CHART_CAP);
+    ChartSample sample = chartBuf[idx];
+    if (cutoff != 0 && sample.t < cutoff) {
+      continue;
+    }
+    int supply = sample.supplyX10;
+    int setp = sample.setX10;
+    snprintf(buf, sizeof(buf), "%s{\"t\":%lu,\"s\":%d.%01d,\"p\":%d.%01d}",
+             first ? "" : ",",
+             (unsigned long)sample.t,
+             supply / 10, abs(supply % 10),
+             setp / 10, abs(setp % 10));
+    server.sendContent(buf);
+    first = false;
+  }
+  server.sendContent("]}");
+}
+
 // Сохранение статистики вентилятора в EEPROM
 void saveFanStatsToEEPROM() {
   EEPROM.put(EEPROM_ADDR_FAN_STATS, fanStats);
@@ -2275,6 +2489,8 @@ void loadFanStatsFromEEPROM() {
   }
 }
 
+static float ignitionHeatC(bool* fromBoiler);
+
 // Функция запуска розжига
 void startIgnition() {
   if (boilerExtinguished || systemState == "КОТЕЛ_ПОГАС" || systemState == "ОШИБКА_РОЗЖИГА" ||
@@ -2292,8 +2508,12 @@ void startIgnition() {
     systemState = "РОЗЖИГ";
     
     char details[50];
-    snprintf(details, sizeof(details), "Температура: %.1f°C", ignitionStartTemp);
+    bool fromBoiler = false;
+    float heatNow = ignitionHeatC(&fromBoiler);
+    if (fromBoiler) snprintf(details, sizeof(details), "подача %.1f котёл %.1f", supplyTemp, heatNow);
+    else snprintf(details, sizeof(details), "подача %.1f", supplyTemp);
     logEvent("IGNITION_STARTED", details);
+    armIgnitionPumpHold();
     
     // Публикация в MQTT
     if (mqttSettings.enabled && mqttClient.connected()) {
@@ -2517,6 +2737,109 @@ bool isSupplyTempValid() {
   return true;
 }
 
+// При остановленном котле насосы крутятся, если улица ниже −5 °C
+// или уличного датчика нет (не назначен, молчит, завис на 85 °C).
+bool outdoorForcesPumps() {
+  if (sensorMapping.outside.length() != 16) return true;
+  if (lastValidOutdoorTempTime == 0) return true;
+  if (outdoorTemp >= 84.9f || outdoorTemp <= -50.0f || outdoorTemp >= 150.0f) return true;
+  unsigned long now = millis();
+  unsigned long age = (now >= lastValidOutdoorTempTime)
+    ? (now - lastValidOutdoorTempTime)
+    : (ULONG_MAX - lastValidOutdoorTempTime + now);
+  if (age >= OUTDOOR_SENSOR_STALE_MS) return true;
+  return outdoorTemp < PUMP_FROST_OUTDOOR_C;
+}
+
+static bool boilerTempUsable() {
+  if (lastValidBoilerTempTime == 0) return false;
+  if (boilerTemp <= 0.5f || boilerTemp >= 120.0f) return false;
+  if (boilerTemp > 84.5f && boilerTemp < 85.5f) return false;
+  unsigned long now = millis();
+  unsigned long age = (now >= lastValidBoilerTempTime)
+    ? (now - lastValidBoilerTempTime)
+    : (ULONG_MAX - lastValidBoilerTempTime + now);
+  return age < OUTDOOR_SENSOR_STALE_MS;
+}
+
+// Температура «котла» для порога насосов. Если датчик котла молчит — подача.
+static float ignitionHeatC(bool* fromBoiler) {
+  if (boilerTempUsable()) {
+    if (fromBoiler) *fromBoiler = true;
+    return boilerTemp;
+  }
+  if (fromBoiler) *fromBoiler = false;
+  if (isSupplyTempValid()) return supplyTemp;
+  return -100.0f;
+}
+
+void clearIgnitionPumpHold() {
+  ignitionPumpHold = false;
+  ignitionPump1Released = false;
+  ignitionPump2AtMs = 0;
+}
+
+void armIgnitionPumpHold() {
+  clearIgnitionPumpHold();
+  bool pumpsWereOff = !pumpState && !pump2State;
+  bool fromBoiler = false;
+  float heat = ignitionHeatC(&fromBoiler);
+  if (!pumpsWereOff) {
+    logEvent("IGNITION", "насосы уже работают");
+    return;
+  }
+  if (heat >= IGNITION_PUMP_TEMP_C) {
+    ignitionPumpHold = true;
+    return;
+  }
+  ignitionPumpHold = true;
+  pumpCircuitApplyPending = false;
+  applyPumpCircuitOutputs(false, false);
+  char details[50];
+  if (fromBoiler) snprintf(details, sizeof(details), "ждём 45, котёл %.1f", heat);
+  else if (heat > -50.0f) snprintf(details, sizeof(details), "ждём 45, подача %.1f", heat);
+  else snprintf(details, sizeof(details), "ждём 45, нет температуры");
+  logEvent("IGNITION", details);
+}
+
+void serviceIgnitionPumps(unsigned long now) {
+  if (!ignitionPumpHold) return;
+  if (!circuit1Enabled && !circuit2Enabled) {
+    logEvent("IGNITION", "контуры выкл");
+    clearIgnitionPumpHold();
+    return;
+  }
+  bool fromBoiler = false;
+  float heat = ignitionHeatC(&fromBoiler);
+  if (!ignitionPump1Released) {
+    if (heat < IGNITION_PUMP_TEMP_C) return;
+    ignitionPump1Released = true;
+    ignitionPump2AtMs = now + IGNITION_PUMP2_DELAY_MS;
+    char details[50];
+    if (circuit1Enabled) {
+      setPumpDesired(true);
+      snprintf(details, sizeof(details), "насос 1, %.1f", heat);
+      logEvent("IGNITION", details);
+      if (!circuit2Enabled) clearIgnitionPumpHold();
+    } else {
+      setPump2Desired(true);
+      snprintf(details, sizeof(details), "насос 2, %.1f", heat);
+      logEvent("IGNITION", details);
+      clearIgnitionPumpHold();
+    }
+    return;
+  }
+  if (circuit1Enabled && circuit2Enabled && now >= ignitionPump2AtMs) {
+    setPump2Desired(true);
+    bool b2 = false;
+    float h2 = ignitionHeatC(&b2);
+    char details[50];
+    snprintf(details, sizeof(details), "насос 2 +30с, %.1f", h2);
+    logEvent("IGNITION", details);
+    clearIgnitionPumpHold();
+  }
+}
+
 // Публикация статуса системы в MQTT (вызывать вне mqttCallback)
 void publishSystemEnabledMqtt() {
   if (!mqttSettings.enabled || !mqttClient.connected()) {
@@ -2647,6 +2970,7 @@ void applySystemEnable(bool enable, const char* source) {
   }
   
   // --- Выключение (мягкое): вентилятор стоп, насос выбегает до стабилизации подачи ---
+  clearIgnitionPumpHold();
   bool wasEnabled = systemEnabled;
   bool needCoast = wasEnabled && (
       fanState ||
@@ -2672,12 +2996,21 @@ void applySystemEnable(bool enable, const char* source) {
   
   saveSystemEnabledToEEPROM();
   
-  // Погас, уголь, таймаут, срыв розжига — вентилятор стоп, насосы остаются.
+  // Погас, уголь, таймаут, срыв розжига — вентилятор стоп.
+  // Горячая подача уходит в выбег. Холодная и без роста — насосы сразу стоп.
   if (isFaultStopState()) {
-    pumpCoastActive = false;
-    pumpCoastStartTime = 0;
-    pumpStableSince = 0;
-    applyPumpCircuitOutputs(true, false);
+    bool supplyCold = !isSupplyTempValid() || supplyTemp < autoSettings.minTemp;
+    int trend = getTemperatureTrend(&supplyHistory);
+    if (supplyCold && trend != 1) {
+      pumpCoastActive = false;
+      pumpCoastStartTime = 0;
+      pumpStableSince = 0;
+      applyPumpCircuitOutputs(false, false);
+      logEvent("PUMP", "стоп, подача холодная");
+    } else {
+      startPumpCoast(src);
+      logEvent("PUMP", "выбег после остановки");
+    }
   } else if (needCoast || (isSupplyTempValid() && supplyTemp >= PUMP_RISE_GUARD_MIN_TEMP && getTemperatureTrend(&supplyHistory) != 0)) {
     startPumpCoast(src);
   } else {
@@ -2702,6 +3035,10 @@ void applySystemEnable(bool enable, const char* source) {
 
 // Логика насоса: обычный режим + выбег после выкл + защита при росте подачи + контуры
 void updatePumpLogic(unsigned long now) {
+  if (ignitionPumpHold) {
+    serviceIgnitionPumps(now);
+    return;
+  }
   if (manualPumpControl && manualPump2Control) {
     return;
   }
@@ -2709,9 +3046,8 @@ void updatePumpLogic(unsigned long now) {
   int supplyTrend = getTemperatureTrend(&supplyHistory);
   bool supplyValid = isSupplyTempValid();
   bool riseGuard = supplyValid && supplyTemp >= PUMP_RISE_GUARD_MIN_TEMP && supplyTrend == 1;
-  bool outdoorTempValid = (outdoorTemp > -50.0 && outdoorTemp < 150.0);
-  bool outdoorTempBelowZero = outdoorTempValid && outdoorTemp < 0.0;
-  bool forceSafety = riseGuard || outdoorTempBelowZero;
+  bool frostPumps = outdoorForcesPumps();
+  bool forceSafety = riseGuard || frostPumps;
   
   // В любом состоянии: рост подачи → насос обязателен (тлеющий котёл разгорелся)
   if (riseGuard) {
@@ -2732,7 +3068,7 @@ void updatePumpLogic(unsigned long now) {
     if (bothCircuitsOff && !forceSafety) {
       shouldPumpRun = false;
     } else if (supplyValid) {
-      if (!outdoorTempValid || outdoorTempBelowZero) {
+      if (frostPumps) {
         shouldPumpRun = true;
       } else {
         if (fanState) {
@@ -2787,7 +3123,7 @@ void updatePumpLogic(unsigned long now) {
   // --- Система выключена ---
   bool shouldPumpRun = false;
   
-  if (outdoorTempBelowZero) {
+  if (frostPumps) {
     shouldPumpRun = true;
   }
   
@@ -2800,7 +3136,7 @@ void updatePumpLogic(unsigned long now) {
       ? (now - pumpCoastStartTime)
       : (ULONG_MAX - pumpCoastStartTime + now);
     
-    if (coastElapsed >= PUMP_COAST_MAX_MS && !riseGuard && !outdoorTempBelowZero) {
+    if (coastElapsed >= PUMP_COAST_MAX_MS && !riseGuard && !frostPumps) {
       pumpCoastActive = false;
       pumpStableSince = 0;
       KLog.println("[Насос] Выбег: достигнут максимум, останавливаем");
@@ -2817,7 +3153,7 @@ void updatePumpLogic(unsigned long now) {
           if (stableElapsed >= PUMP_STABLE_HOLD_MS && coastElapsed >= PUMP_COAST_MIN_MS) {
             pumpCoastActive = false;
             pumpStableSince = 0;
-            if (!outdoorTempBelowZero && !riseGuard) {
+            if (!frostPumps && !riseGuard) {
               shouldPumpRun = false;
             }
             KLog.println("[Насос] Выбег: подача стабильна, останавливаем");
@@ -2829,10 +3165,6 @@ void updatePumpLogic(unsigned long now) {
     }
   }
   
-  if (isFaultStopState()) {
-    shouldPumpRun = true;
-  }
-
   if (shouldPumpRun) {
     if (!pumpState && !pump2State) {
       lastPumpRunTime = now;
@@ -7084,6 +7416,7 @@ void setup() {
     KLog.println("[ОШИБКА] SPIFFS не смонтирован!");
   } else {
     loadEventLogFromSpiffs();
+    loadChartFromSpiffs();
   }
   
   // Определение состояния системы при запуске (всегда рабочий режим после питания)
@@ -7096,6 +7429,11 @@ void setup() {
   char bootDetails[49];
   snprintf(bootDetails, sizeof(bootDetails), "reason=%s #%lu @%s", lastResetReason.c_str(), (unsigned long)bootCount, bootPrevStage);
   logEvent("BOOT", bootDetails);
+  {
+    char bootHeap[48];
+    snprintf(bootHeap, sizeof(bootHeap), "heap=%lu", (unsigned long)ESP.getFreeHeap());
+    logEvent("BOOT", bootHeap);
+  }
   
   // Попытка подключения к WiFi с приоритетом
   bool wifiConnected = false;
@@ -7215,6 +7553,7 @@ void setup() {
   
   // API endpoints
   server.on("/api/status", HTTP_GET, handleStatus);
+  server.on("/api/history", HTTP_GET, handleHistory);
   server.on("/api/diagnostics", HTTP_GET, handleDiagnostics);
   server.on("/api/setpoint", HTTP_POST, handleSetpoint);
   server.on("/api/control", HTTP_POST, handleControl);
@@ -7353,6 +7692,7 @@ void loop() {
     eventLogDirty = false;
     lastEventLogFlush = now;
   }
+  serviceChart(now);
   
   // Автоматическая проверка обновлений
   if (updateSettings.autoCheckEnabled && WiFi.status() == WL_CONNECTED) {
@@ -7379,7 +7719,11 @@ void loop() {
     static bool mqttWasConnected = false;
     if (!mqttClient.connected()) {
       if (mqttWasConnected) {
-        logEvent("MQTT_DISCONNECT", "");
+        static uint16_t mqttDropCount = 0;
+        mqttDropCount++;
+        char drop[40];
+        snprintf(drop, sizeof(drop), "обрыв %u rssi=%d", mqttDropCount, WiFi.RSSI());
+        logEvent("MQTT_DISCONNECT", drop);
         mqttWasConnected = false;
       }
       static unsigned long lastReconnect = 0;
@@ -7711,6 +8055,15 @@ void loop() {
   unsigned long thisLoopMs = currentLoopTime / 1000UL;
   if (thisLoopMs > maxLoopMs) {
     maxLoopMs = thisLoopMs;
+  }
+  if (thisLoopMs >= 8000UL) {
+    static unsigned long lastSlowLog = 0;
+    if (lastSlowLog == 0 || now - lastSlowLog >= 60000UL || now < lastSlowLog) {
+      lastSlowLog = now;
+      char slow[40];
+      snprintf(slow, sizeof(slow), "цикл %lu мс", (unsigned long)thisLoopMs);
+      logEvent("LOOP", slow);
+    }
   }
   
   // Реальная загрузка: доля времени, проведённого в loop(), от календарного периода
