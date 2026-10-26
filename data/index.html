@@ -1053,6 +1053,10 @@
                 </div>
             </div>
 
+            <div style="padding:12px;background:#2a2a2a;border-radius:12px;margin:8px 0">
+                <button id="encoderLockButton" disabled onclick="toggleEncoderLock()" style="width:100%;padding:12px;border-radius:8px">Энкодер: загрузка состояния…</button>
+                <div id="encoderLockError" role="status" style="color:#ffb36b"></div>
+            </div>
             <!-- Управление: Система и Подброс угля -->
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0;">
                 <!-- Система вкл/выкл -->
@@ -1088,7 +1092,7 @@
                 <h3>Температуры котла</h3>
                 <div class="setting-item">
                     <label>Уставка температуры котла (°C)</label>
-                    <input type="number" id="autoSetpoint" min="40" max="80" value="60" step="1">
+                    <input type="number" id="autoSetpoint" oninput="this.dataset.edited = '1'" min="40" max="80" value="60" step="1">
                 </div>
                 <div class="setting-item">
                     <label>Минимальная температура котла (°C)</label>
@@ -1184,7 +1188,7 @@
                 <h3>Аутентификация</h3>
                 <div class="setting-item">
                     <label>Логин</label>
-                    <input type="text" id="mqttUser" placeholder="u_OLTTB0">
+                    <input type="text" id="mqttUser" placeholder="">
                 </div>
                 <div class="setting-item">
                     <label>Пароль</label>
@@ -2115,73 +2119,76 @@
             }
         }
 
-        function changeSetpoint(delta) {
-            const setpointValueEl = document.getElementById('setpointValue');
-            if (!setpointValueEl) return;
-            
-            const workModeSwitch = document.getElementById('workModeSwitch');
-            const isComfortMode = workModeSwitch && workModeSwitch.checked;
-            
-            let newValue, minVal, maxVal, apiEndpoint, step, setpointEl;
-            if (isComfortMode) {
-                // В режиме Комфорт меняем targetHomeTemp (шаг 0.5)
-                setpointEl = document.getElementById('homeSetpointValue');
-                if (!setpointEl) return;
-                const current = parseFloat(setpointEl.textContent);
-                minVal = 20;
-                maxVal = 28;
-                step = 0.5;
-                apiEndpoint = '/api/settings/comfort';
-                newValue = Math.max(minVal, Math.min(maxVal, current + (delta * step)));
-                // Обновляем отображение сразу
-                setpointEl.textContent = newValue.toFixed(1);
-                // Обновляем в настройках тоже
-                const comfortTargetEl = document.getElementById('comfortTargetHomeTemp');
-                if (comfortTargetEl) comfortTargetEl.value = newValue;
-                // Отправляем обновление
-                fetch(apiEndpoint, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ targetHomeTemp: newValue })
-                })
-                .then(r => r.json())
-                .then(d => {
-                    if (!d.success) {
-                        // Откатываем при ошибке
-                        setpointEl.textContent = current.toFixed(1);
-                        if (comfortTargetEl) comfortTargetEl.value = current;
-                    }
-                })
-                .catch(e => {
-                    console.error('Error:', e);
-                    setpointEl.textContent = current.toFixed(1);
-                    if (comfortTargetEl) comfortTargetEl.value = current;
-                });
-            } else {
-                // В режиме Авто меняем setpoint (шаг 1)
-                setpointEl = document.getElementById('setpointValue');
-                if (!setpointEl) return;
-                const current = parseFloat(setpointEl.textContent);
-                minVal = 40;
-                maxVal = 80;
-                step = 1;
-                apiEndpoint = '/api/setpoint';
-                // В режиме Авто шаг всегда 1
-                newValue = Math.max(minVal, Math.min(maxVal, current + (delta * step)));
-                setpointEl.textContent = newValue.toFixed(0);
-                
-                fetch(apiEndpoint + '?value=' + newValue, { method: 'POST' })
-                    .then(r => r.json())
-                    .then(d => {
-                        if (!d.success) {
-                            setpointEl.textContent = current.toFixed(0);
-                        }
-                    })
-                    .catch(e => {
-                        console.error('Error:', e);
-                        setpointEl.textContent = current.toFixed(0);
-                    });
+        // One outstanding command per control; polls cannot overwrite local edits.
+        function makeTargetControl(id, min, max, digits, send) {
+            let desired = null, busy = false, revision = 0;
+            function show(value) {
+                const el = document.getElementById(id);
+                if (el) el.textContent = value.toFixed(digits);
             }
+            function status(message) {
+                let el = document.getElementById(id + 'SaveStatus');
+                if (!el) {
+                    const value = document.getElementById(id);
+                    if (!value) return;
+                    el = document.createElement('small');
+                    el.id = id + 'SaveStatus';
+                    el.style.cssText = 'display:block;font-size:11px';
+                    value.parentElement.appendChild(el);
+                }
+                el.textContent = message;
+            }
+            async function flush() {
+                if (busy || desired === null) return;
+                busy = true;
+                const sent = desired;
+                desired = null;
+                status('Сохранение…');
+                try {
+                    const response = await send(sent);
+                    const data = await response.json();
+                    if (!response.ok || !data.success) throw new Error(data.error || 'Ошибка сохранения');
+                    status(data.persisted === false ? 'Применено; сохранение повторяется' : 'Сохранено');
+                } catch (error) {
+                    status('Не подтверждено: ' + (error && error.message ? error.message : 'ошибка связи'));
+                    console.error(error);
+                } finally {
+                    busy = false;
+                    revision++; // Invalidate every poll started before completion.
+                    if (desired !== null) flush();
+                }
+            }
+            return {
+                change(delta) {
+                    const el = document.getElementById(id);
+                    if (!el) return;
+                    const value = Number.parseFloat(el.textContent);
+                    if (!Number.isFinite(value)) return;
+                    desired = Math.max(min, Math.min(max, value + delta));
+                    revision++;
+                    show(desired);
+                    flush();
+                },
+                token() { return revision; },
+                poll(value, token, persisted) {
+                    if (!busy && desired === null && token === revision && Number.isFinite(value)) {
+                        show(value);
+                        if (typeof persisted === 'boolean') {
+                            status(persisted ? 'Сохранено' : 'Команда применена; сохранение повторяется');
+                        }
+                    }
+                }
+            };
+        }
+        const boilerTarget = makeTargetControl('setpointValue', 40, 80, 0,
+            value => fetch('/api/setpoint?value=' + value, {method:'POST', cache:'no-store'}));
+        const homeTarget = makeTargetControl('homeSetpointValue', 20, 28, 1,
+            value => fetch('/api/settings/comfort', {method:'POST',
+                headers:{'Content-Type':'application/json'}, body:JSON.stringify({targetHomeTemp:value})}));
+        function changeSetpoint(delta) {
+            const mode = document.getElementById('workModeSwitch');
+            if (mode && mode.checked) homeTarget.change(delta);
+            else boilerTarget.change(delta);
         }
 
         function toggleDevice(device) {
@@ -2318,8 +2325,12 @@
             }
         }
 
+        let statusRequestSequence = 0, lastStatusApplied = 0;
         function updateData() {
-            fetch('/api/status')
+            const statusSequence = ++statusRequestSequence;
+            const boilerToken = boilerTarget.token();
+            const homeToken = homeTarget.token();
+            fetch('/api/status', {cache:'no-store'})
                 .then(r => {
                     if (!r.ok) {
                         throw new Error('HTTP error! status: ' + r.status);
@@ -2332,6 +2343,8 @@
                         return;
                     }
                     
+                    if (statusSequence < lastStatusApplied) return;
+                    lastStatusApplied = statusSequence;
                     // Определяем режим работы
                     const isComfortMode = (d.workMode === 1);
                     
@@ -2391,14 +2404,8 @@
                     updateTrendArrow('supplyTempTrendArrow', d.supplyTrend);
                     
                     // Обновление уставки подачи (только в режиме Авто)
-                    const setpointValue = document.getElementById('setpointValue');
-                    if (setpointValue) {
-                        const newSetpoint = d.setpoint !== null ? d.setpoint.toFixed(0) : '60';
-                        if (setpointValue.textContent !== newSetpoint) {
-                            setpointValue.textContent = newSetpoint;
-                        }
-                    }
-                    
+                    boilerTarget.poll(d.setpoint, boilerToken, d.setpointPersisted);
+
                     // Обновление температуры дома
                     const homeTempValue = document.getElementById('homeTempValue');
                     const homeTempUnit = document.getElementById('homeTempUnit');
@@ -2432,14 +2439,7 @@
                     updateTrendArrow('homeTempTrendArrow', d.homeTrend);
                     
                     // Обновление уставки дома (только в режиме Комфорт)
-                    const homeSetpointValue = document.getElementById('homeSetpointValue');
-                    if (homeSetpointValue) {
-                        const newSetpoint = d.targetHomeTemp !== null && d.targetHomeTemp !== undefined ? 
-                            d.targetHomeTemp.toFixed(1) : '24.0';
-                        if (homeSetpointValue.textContent !== newSetpoint) {
-                            homeSetpointValue.textContent = newSetpoint;
-                        }
-                    }
+                    homeTarget.poll(d.targetHomeTemp, homeToken);
                     
                     // Обновление температуры обратки
                     const returnTemp = document.getElementById('returnTemp');
@@ -2570,6 +2570,7 @@
                             'IDLE': 'Ожидание',
                             'HEATING': 'Разогрев',
                             'HEATING_TIMEOUT': 'Таймаут разогрева',
+                            'SENSOR_FAULT': 'Нет датчика подачи >5 мин',
                             'COAL_BURNED': 'Уголь прогорел',
                             'OVERHEAT': 'Перегрев',
                             'HIGH_TEMP': 'Высокая температура',
@@ -2600,7 +2601,10 @@
                         let stateText;
                         let stateForColor;
                         
-                        if (d.workMode === 1 && d.comfortState) {
+                        if (d.supplySensorFault || d.state === 'SENSOR_FAULT') {
+                            stateText = d.supplyRecoveryStable ? 'Датчик подачи: проверка стабильности' : 'Нет датчика подачи >5 мин';
+                            stateForColor = 'SENSOR_FAULT';
+                        } else if (d.workMode === 1 && d.comfortState) {
                             // Режим Комфорт - используем comfortState
                             stateText = comfortStateTranslations[d.comfortState] || d.comfortState;
                             stateForColor = d.comfortState;
@@ -2619,7 +2623,7 @@
                         if (stateForColor === 'HEATING' || stateForColor === 'HEATING_1' || stateForColor === 'HEATING_2' || 
                             stateForColor === 'Разогрев 1' || stateForColor === 'Разогрев 2' || stateForColor === 'РОЗЖИГ') {
                             systemModeText.style.color = '#00ff00';
-                        } else if (stateForColor === 'OVERHEAT' || stateForColor === 'HIGH_TEMP') {
+                        } else if (stateForColor === 'SENSOR_FAULT' || stateForColor === 'OVERHEAT' || stateForColor === 'HIGH_TEMP') {
                             systemModeText.style.color = '#ff0000';
                         } else if (stateForColor === 'COAL_BURNED' || stateForColor === 'HEATING_TIMEOUT' ||
                                    stateForColor === 'КОТЕЛ_ПОГАС' || stateForColor === 'ОШИБКА_РОЗЖИГА') {
@@ -2637,6 +2641,7 @@
                         updateUpdateResultBanner(d.updateResult);
                     }
                     
+                    updateEncoderLock(d.encoderLocked);
                     // Обновление статуса подброса угля
                     if (d.coalFeeding !== undefined) {
                         updateCoalFeedingStatus(d.coalFeeding, d.coalFeedingRemaining || 0);
@@ -2760,6 +2765,26 @@
                 });
         }
 
+        var encoderLockState = null;
+        var encoderLockBusy = false;
+        function updateEncoderLock(locked) {
+            var b = document.getElementById('encoderLockButton');
+            if (typeof locked !== 'boolean') { encoderLockState = null; b.disabled = true; b.textContent = 'Энкодер: требуется новая прошивка'; return; }
+            encoderLockState = locked;
+            b.disabled = encoderLockBusy;
+            b.textContent = locked ? '🔒 Энкодер заблокирован · Разблокировать' : '🔓 Энкодер работает · Заблокировать';
+        }
+        function toggleEncoderLock() {
+            if (encoderLockBusy || encoderLockState === null) return;
+            encoderLockBusy = true;
+            document.getElementById('encoderLockButton').disabled = true;
+            document.getElementById('encoderLockError').textContent = '';
+            fetch('/api/encoder/lock', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({locked:!encoderLockState})})
+            .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+            .then(function(d) { if (typeof d.locked !== 'boolean') throw new Error('Некорректный ответ'); encoderLockBusy = false; updateEncoderLock(d.locked); })
+            .catch(function(e) { encoderLockBusy = false; document.getElementById('encoderLockError').textContent = 'Команда не подтверждена: ' + e.message; updateEncoderLock(encoderLockState); });
+        }
+
         // Функции для управления подбросом угля (переключатель)
         function toggleCoalFeeding() {
             fetch('/api/coalFeeding', { method: 'POST' })
@@ -2844,7 +2869,6 @@
 
         function saveAutoSettings() {
             const settings = {
-                setpoint: parseFloat(document.getElementById('autoSetpoint').value),
                 minTemp: parseFloat(document.getElementById('autoMinTemp').value),
                 maxTemp: parseFloat(document.getElementById('autoMaxTemp').value),
                 hysteresis: parseFloat(document.getElementById('autoHysteresis').value),
@@ -2854,6 +2878,8 @@
                 heatingTimeout: parseFloat(document.getElementById('autoHeatingTimeout').value)
             };
             
+            const setpointInput = document.getElementById('autoSetpoint');
+            if (setpointInput.dataset.edited === '1') settings.setpoint = parseFloat(setpointInput.value);
             fetch('/api/settings/auto', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -2861,6 +2887,8 @@
             })
             .then(r => r.json())
             .then(d => {
+                if (!d.success) throw new Error(d.error || 'Ошибка сохранения');
+                if (settings.setpoint === parseFloat(setpointInput.value)) delete setpointInput.dataset.edited;
                 alert('Настройки сохранены!');
             })
             .catch(e => {
@@ -2977,7 +3005,8 @@
                 .then(d => {
                     // Проверка и установка значений с валидацией
                     if (d.setpoint !== undefined && d.setpoint !== null && !isNaN(d.setpoint) && d.setpoint >= 40 && d.setpoint <= 80) {
-                        document.getElementById('autoSetpoint').value = d.setpoint;
+                        const input = document.getElementById('autoSetpoint');
+                        if (input.dataset.edited !== '1') input.value = d.setpoint;
                     }
                     if (d.minTemp !== undefined && d.minTemp !== null && !isNaN(d.minTemp) && d.minTemp >= 30 && d.minTemp <= 60) {
                         document.getElementById('autoMinTemp').value = d.minTemp;
@@ -4167,7 +4196,7 @@
                 statusEl.style.background = '#3498DB';
             }
             
-            fetch('/api/update/check')
+            fetch('/api/update/check', {cache:'no-store'})
                 .then(r => {
                     if (!r.ok) {
                         throw new Error(`HTTP ${r.status}: ${r.statusText}`);
@@ -4182,7 +4211,7 @@
                     if (latestEl) latestEl.value = d.latestVersion || 'Неизвестно';
                     
                     // Проверяем наличие ошибки (только если это реальная ошибка, а не просто "нет обновлений")
-                    if (d.error && d.error !== "Could not check for updates. Check serial output for details.") {
+                    if (d.error) {
                         // Это реальная ошибка (например, WiFi не подключен)
                         if (statusEl) {
                             statusEl.textContent = 'Ошибка: ' + d.error;
@@ -4405,4 +4434,5 @@
     </script>
 </body>
 </html>
+
 

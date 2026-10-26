@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include "SupplyGuard.h"
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <WebServer.h>
@@ -56,7 +57,9 @@ extern "C" bool verifyRollbackLater() { return true; }
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.50"
+#define FIRMWARE_VERSION "4.2.56"
+#include "OtaResultPolicy.h"
+#include "SettingsStore.h"
 #define DISCOVERY_UDP_PORT 4210
 #define DISCOVERY_BEACON_INTERVAL_MS 1000
 
@@ -103,6 +106,11 @@ static KotelLogSink KLog;
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 
 // Переменные для энкодера
+volatile bool encoderLocked = true;
+portMUX_TYPE encoderMux = portMUX_INITIALIZER_UNLOCKED;
+volatile int encoderQuarterSteps = 0;
+volatile unsigned long encoderActivity = 0;
+unsigned long encoderResetGeneration = 0;
 volatile int encoderPosition = 0;
 volatile int lastEncoderState = 0;
 volatile int lastValidEncoderState = 0; // Последнее валидное состояние для фильтрации дребезга
@@ -135,6 +143,11 @@ OneWire oneWire2(PIN_DS18B20_2);  // Шина 2: Котельная, Улица
 DallasTemperature sensors2(&oneWire2);
 
 // Заглушки данных (заменить на реальные функции управления котлом)
+SupplyGuard supplyGuard;
+bool supplyFaultApplied = false;
+bool supplyFaultFanWasOn = false;
+unsigned long supplyFaultStart = 0;
+bool otaSafeMode = false;
 float supplyTemp = 0.0;
 float returnTemp = 0.0;
 float boilerTemp = 0.0;
@@ -320,6 +333,8 @@ struct FanStatistics {
 // Флаг для отложенного сохранения в EEPROM
 bool autoSettingsDirty = false;
 unsigned long lastAutoSettingsChange = 0;
+unsigned long lastAutoSettingsAttempt = 0;
+bool autoSettingsSaveFailed = false;
 
 // Глобальная переменная для отложенной перезагрузки
 unsigned long pendingRebootTime = 0;
@@ -355,8 +370,8 @@ struct MqttSettings {
   String server = "m5.wqtt.ru";
   int port = 5374;
   bool useTLS = false;
-  String user = "u_OLTTB0";
-  String password = "XDzCIXr0";
+  String user = "";
+  String password = "";
   String prefix = "kotel/device1";
   int tempInterval = 10;
   int stateInterval = 30;
@@ -439,7 +454,7 @@ struct TunnelSettings {
   bool enabled = true;
   String vpsHost = "78.17.67.121";
   int vpsPort = 7000;
-  String authToken = "d64e99e3bcbe489295343b52bb296fea";
+  String authToken = "";
   int remotePort = 18080;
   int localTargetPort = 80;
   String publicUrl = "http://78.17.67.121:18080";
@@ -492,6 +507,10 @@ void checkCoalFeeding();
 int getCoalFeedingRemainingSeconds();
 void updateDisplay();
 void setupOTA();
+void serviceSupplyGuard(unsigned long now);
+void forceOtaOutputs();
+void beginOtaSafeMode();
+void endOtaSafeMode();
 void updateTemperatures();
 float getTemperatureByAddress(String address);
 void saveWiFiSettingsToEEPROM();
@@ -550,6 +569,7 @@ bool parseMqttOnOff(const String& message, bool& enableOut);
 void handleCircuits();
 void saveOtaResult(uint8_t status, const char* fromVer, const char* toVer, const char* message);
 void loadOtaResult();
+void reconcileOtaResult(const char* remoteVersion = nullptr);
 void clearOtaResult();
 void handleUpdateAck();
 void handleTunnelSettingsGet();
@@ -617,64 +637,27 @@ void servicePumpBootWindow() {
 
 // Функция обработки прерывания энкодера с улучшенной фильтрацией дребезга
 void IRAM_ATTR encoderISR() {
-  // Защита от слишком частых прерываний (дребезг)
-  unsigned long nowMicros = micros();
-  if (nowMicros - lastEncoderISRCallTime < ENCODER_ISR_DEBOUNCE_US) {
-    return; // Игнорируем слишком частые прерывания
+  portENTER_CRITICAL_ISR(&encoderMux);
+  int current = (digitalRead(PIN_ENCODER_CLK) << 1) | digitalRead(PIN_ENCODER_DT);
+  int previous = lastEncoderState;
+  lastEncoderState = current;
+  if (current != previous) encoderActivity = millis();
+  if (encoderLocked || ((previous ^ current) == 3)) {
+    encoderQuarterSteps = 0;
+  } else if (previous != current) {
+    int direction = ((previous == 0 && current == 1) ||
+                     (previous == 1 && current == 3) ||
+                     (previous == 3 && current == 2) ||
+                     (previous == 2 && current == 0)) ? -1 : 1;
+    encoderQuarterSteps += direction;
+    // Only a complete quadrature cycle at the resting state is a step.
+    if (current == 3) {
+      if (encoderQuarterSteps == 4 && encoderPosition < 16) ++encoderPosition;
+      if (encoderQuarterSteps == -4 && encoderPosition > -16) --encoderPosition;
+      encoderQuarterSteps = 0;
+    }
   }
-  lastEncoderISRCallTime = nowMicros;
-  
-  encoderISRCount++; // Увеличиваем счетчик прерываний
-  
-  int clkState = digitalRead(PIN_ENCODER_CLK);
-  int dtState = digitalRead(PIN_ENCODER_DT);
-  int currentState = (clkState << 1) | dtState;
-  
-  // Обновляем lastEncoderState для отслеживания изменений
-  lastEncoderState = currentState;
-  
-  // Фильтрация: обрабатываем только валидные переходы состояний
-  // Валидные переходы для quadrature энкодера:
-  // 00 -> 01 -> 11 -> 10 -> 00 (по часовой)
-  // 00 -> 10 -> 11 -> 01 -> 00 (против часовой)
-  
-  int lastValid = lastValidEncoderState;
-  int current = currentState;
-  
-  // Проверяем валидность перехода
-  bool validTransition = false;
-  int direction = 0; // 1 = вправо, -1 = влево
-  
-  // Валидные переходы для поворота вправо (по часовой) - поменяно местами
-  if ((lastValid == 0b00 && current == 0b01) ||
-      (lastValid == 0b01 && current == 0b11) ||
-      (lastValid == 0b11 && current == 0b10) ||
-      (lastValid == 0b10 && current == 0b00)) {
-    validTransition = true;
-    direction = -1; // Поменяно: было 1, стало -1
-  }
-  // Валидные переходы для поворота влево (против часовой) - поменяно местами
-  else if ((lastValid == 0b00 && current == 0b10) ||
-           (lastValid == 0b10 && current == 0b11) ||
-           (lastValid == 0b11 && current == 0b01) ||
-           (lastValid == 0b01 && current == 0b00)) {
-    validTransition = true;
-    direction = 1; // Поменяно: было -1, стало 1
-  }
-  
-  // Если переход валидный, обновляем позицию
-  if (validTransition) {
-    encoderPosition += direction;
-    lastValidEncoderState = current;
-    unsigned long now = millis();
-    lastEncoderChange = now;
-    lastEncoderISRTime = now;
-  }
-  // Если переход невалидный, но состояние стабильное (не дребезг), обновляем lastValid
-  else if (current == 0b00 || current == 0b11) {
-    // Стабильные состояния - можно обновить lastValid для восстановления после пропусков
-    lastValidEncoderState = current;
-  }
+  portEXIT_CRITICAL_ISR(&encoderMux);
 }
 
 // Обновление дисплея OLED
@@ -929,15 +912,16 @@ void updateTemperatures() {
       // Время конвертации прошло, читаем температуры
       if (sensorMapping.supply.length() == 16) {
         float temp = getTemperatureByAddress(sensorMapping.supply);
+        supplyGuard.sample(now, temp, temp != DEVICE_DISCONNECTED_C);
         if (temp != DEVICE_DISCONNECTED_C && temp != -127.0) {
-          // Проверка на зависание (0 или 85 градусов), но разрешаем отрицательные температуры
-          if ((temp < -0.1 || temp > 0.1) && temp < 84.9) {
+          // Принимаем корректный результат преобразования во всём диапазоне датчика
+          if (SupplyGuard::validReading(temp)) {
             // Валидное показание (включая отрицательные) - обновляем время
             lastValidSupplyTempTime = now;
             supplyTemp = temp;
             addToHistory(&supplyHistory, temp);
           } else {
-            // Зависшее показание (0 или 85) - не обновляем температуру, но проверяем таймер
+            // Некорректное показание: не подменяем последнюю температуру
             if (lastValidSupplyTempTime == 0) {
               lastValidSupplyTempTime = now;  // Первое показание - устанавливаем время
             }
@@ -948,8 +932,8 @@ void updateTemperatures() {
       if (sensorMapping.return_sensor.length() == 16) {
         float temp = getTemperatureByAddress(sensorMapping.return_sensor);
         if (temp != DEVICE_DISCONNECTED_C && temp != -127.0) {
-          // Проверка на зависание (0 или 85 градусов), но разрешаем отрицательные температуры
-          if ((temp < -0.1 || temp > 0.1) && temp < 84.9) {
+          // Принимаем корректный результат преобразования во всём диапазоне датчика
+          if (SupplyGuard::validReading(temp)) {
             // Валидное показание (включая отрицательные) - обновляем время
             lastValidReturnTempTime = now;
             // Для датчика обратки - базовая защита от помех (только очень большие скачки)
@@ -959,7 +943,7 @@ void updateTemperatures() {
               addToHistory(&returnHistory, temp);
             }
           } else {
-            // Зависшее показание (0 или 85) - не обновляем температуру, но проверяем таймер
+            // Некорректное показание: не подменяем последнюю температуру
             if (lastValidReturnTempTime == 0) {
               lastValidReturnTempTime = now;  // Первое показание - устанавливаем время
             }
@@ -970,14 +954,14 @@ void updateTemperatures() {
       if (sensorMapping.boiler.length() == 16) {
         float temp = getTemperatureByAddress(sensorMapping.boiler);
         if (temp != DEVICE_DISCONNECTED_C && temp != -127.0) {
-          // Проверка на зависание (0 или 85 градусов), но разрешаем отрицательные температуры
-          if ((temp < -0.1 || temp > 0.1) && temp < 84.9) {
+          // Принимаем корректный результат преобразования во всём диапазоне датчика
+          if (SupplyGuard::validReading(temp)) {
             // Валидное показание (включая отрицательные) - обновляем время
             lastValidBoilerTempTime = now;
             boilerTemp = temp;
             addToHistory(&boilerHistory, temp);
           } else {
-            // Зависшее показание (0 или 85) - не обновляем температуру, но проверяем таймер
+            // Некорректное показание: не подменяем последнюю температуру
             if (lastValidBoilerTempTime == 0) {
               lastValidBoilerTempTime = now;  // Первое показание - устанавливаем время
             }
@@ -988,14 +972,14 @@ void updateTemperatures() {
       if (sensorMapping.outside.length() == 16) {
         float temp = getTemperatureByAddress(sensorMapping.outside);
         if (temp != DEVICE_DISCONNECTED_C && temp != -127.0) {
-          // Для датчика улицы: 0°C - валидное значение (зима), блокируем только 85°C
-          if (temp < 84.9) {
+          // Для датчика улицы также принимаем весь физический диапазон
+          if (SupplyGuard::validReading(temp)) {
             // Валидное показание (включая 0°C) - обновляем время
             lastValidOutdoorTempTime = now;
             outdoorTemp = temp;
             addToHistory(&outdoorHistory, temp);
           } else {
-            // Зависшее показание (85°C) - не обновляем температуру, но проверяем таймер
+            // Некорректное показание: ждём восстановления связи
             if (lastValidOutdoorTempTime == 0) {
               lastValidOutdoorTempTime = now;  // Первое показание - устанавливаем время
             }
@@ -1150,13 +1134,13 @@ void checkSensorsDetection() {
 }
 
 // Функции работы с EEPROM
-void saveAutoSettingsToEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
-  EEPROM.put(EEPROM_ADDR_MAGIC, (uint8_t)EEPROM_MAGIC);
+bool saveAutoSettingsToEEPROM() {
+  lastAutoSettingsAttempt = millis();
+  autoSettingsDirty = true;
   
   // Сохранение через JSON для надежности
   String json;
-  DynamicJsonDocument doc(512);
+  DynamicJsonDocument doc(2048);
   doc["setpoint"] = autoSettings.setpoint;
   doc["minTemp"] = autoSettings.minTemp;
   doc["maxTemp"] = autoSettings.maxTemp;
@@ -1167,29 +1151,34 @@ void saveAutoSettingsToEEPROM() {
   doc["heatingTimeout"] = autoSettings.heatingTimeout;
   serializeJson(doc, json);
   
-  int len = json.length();
-  EEPROM.put(EEPROM_ADDR_AUTO, len);
-  for (int i = 0; i < len && i < 200; i++) {
-    EEPROM.write(EEPROM_ADDR_AUTO + 4 + i, json[i]);
+  if (doc.overflowed() || (!writeSettingsJson("auto", json) || readSettingsJson("auto") != json)) {
+    settingsStoreError = true;
+    KLog.println("Settings write failed");
+    if (!autoSettingsSaveFailed) logEvent("SETTINGS_ERROR", "auto save failed; retry");
+    autoSettingsSaveFailed = true;
+    return false;
   }
-  EEPROM.commit();
-  EEPROM.end();
+  autoSettingsDirty = false;
+  if (autoSettingsSaveFailed) logEvent("SETTINGS_OK", "auto save recovered");
+  autoSettingsSaveFailed = false;
+  return true;
+}
+
+void serviceAutoSettingsSave() {
+  const unsigned long current = millis();
+  if (autoSettingsDirty &&
+      static_cast<unsigned long>(current - lastAutoSettingsChange) >= 2000UL &&
+      (!autoSettingsSaveFailed ||
+       static_cast<unsigned long>(current - lastAutoSettingsAttempt) >= 5000UL)) {
+    saveAutoSettingsToEEPROM();
+  }
 }
 
 void loadAutoSettingsFromEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
-  uint8_t magic = 0;
-  EEPROM.get(EEPROM_ADDR_MAGIC, magic);
-  
-  if (magic == EEPROM_MAGIC) {
-    int len = 0;
-    EEPROM.get(EEPROM_ADDR_AUTO, len);
-    if (len > 0 && len < 250) {
-      String json = "";
-      for (int i = 0; i < len; i++) {
-        json += (char)EEPROM.read(EEPROM_ADDR_AUTO + 4 + i);
-      }
-      DynamicJsonDocument doc(512);
+  String json = readSettingsJson("auto");
+  if (json.length() > 0) {
+    if (json.length() <= SETTINGS_JSON_MAX) {
+      DynamicJsonDocument doc(2048);
       DeserializationError error = deserializeJson(doc, json);
       
       if (error == DeserializationError::Ok) {
@@ -1238,13 +1227,11 @@ void loadAutoSettingsFromEEPROM() {
     KLog.println("EEPROM empty, using defaults");
     saveAutoSettingsToEEPROM();
   }
-  EEPROM.end();
 }
 
 void saveMqttSettingsToEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
   String json;
-  DynamicJsonDocument doc(512);
+  DynamicJsonDocument doc(2048);
   doc["enabled"] = mqttSettings.enabled;
   doc["server"] = mqttSettings.server;
   doc["port"] = mqttSettings.port;
@@ -1256,29 +1243,17 @@ void saveMqttSettingsToEEPROM() {
   doc["stateInterval"] = mqttSettings.stateInterval;
   serializeJson(doc, json);
   
-  int len = json.length();
-  EEPROM.put(EEPROM_ADDR_MQTT, len);
-  for (int i = 0; i < len && i < 180; i++) {
-    EEPROM.write(EEPROM_ADDR_MQTT + 4 + i, json[i]);
+  if (doc.overflowed() || !writeSettingsJson("mqtt", json)) {
+    settingsStoreError = true;
+    KLog.println("Settings write failed");
   }
-  EEPROM.commit();
-  EEPROM.end();
 }
 
 void loadMqttSettingsFromEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
-  uint8_t magic = 0;
-  EEPROM.get(EEPROM_ADDR_MAGIC, magic);
-  
-  if (magic == EEPROM_MAGIC) {
-    int len = 0;
-    EEPROM.get(EEPROM_ADDR_MQTT, len);
-    if (len > 0 && len < 200) {
-      String json = "";
-      for (int i = 0; i < len; i++) {
-        json += (char)EEPROM.read(EEPROM_ADDR_MQTT + 4 + i);
-      }
-      DynamicJsonDocument doc(512);
+  String json = readSettingsJson("mqtt");
+  if (json.length() > 0) {
+    if (json.length() <= SETTINGS_JSON_MAX) {
+      DynamicJsonDocument doc(2048);
       deserializeJson(doc, json);
       if (doc.containsKey("enabled")) mqttSettings.enabled = doc["enabled"];
       if (doc.containsKey("server")) mqttSettings.server = doc["server"].as<String>();
@@ -1291,43 +1266,29 @@ void loadMqttSettingsFromEEPROM() {
       if (doc.containsKey("stateInterval")) mqttSettings.stateInterval = doc["stateInterval"];
     }
   }
-  EEPROM.end();
 }
 
 void saveSensorMappingToEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
   String json;
-  DynamicJsonDocument doc(256);
+  DynamicJsonDocument doc(2048);
   doc["supply"] = sensorMapping.supply;
   doc["return"] = sensorMapping.return_sensor;
   doc["boiler"] = sensorMapping.boiler;
   doc["outside"] = sensorMapping.outside;
   serializeJson(doc, json);
   
-  int len = json.length();
-  EEPROM.put(EEPROM_ADDR_SENSORS, len);
-  for (int i = 0; i < len && i < 200; i++) {
-    EEPROM.write(EEPROM_ADDR_SENSORS + 4 + i, json[i]);
+  if (doc.overflowed() || !writeSettingsJson("sensors", json)) {
+    settingsStoreError = true;
+    KLog.println("Settings write failed");
   }
-  EEPROM.commit();
-  EEPROM.end();
   KLog.println("Sensor mapping saved to EEPROM");
 }
 
 void loadSensorMappingFromEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
-  uint8_t magic = 0;
-  EEPROM.get(EEPROM_ADDR_MAGIC, magic);
-  
-  if (magic == EEPROM_MAGIC) {
-    int len = 0;
-    EEPROM.get(EEPROM_ADDR_SENSORS, len);
-    if (len > 0 && len < 250) {
-      String json = "";
-      for (int i = 0; i < len; i++) {
-        json += (char)EEPROM.read(EEPROM_ADDR_SENSORS + 4 + i);
-      }
-      DynamicJsonDocument doc(256);
+  String json = readSettingsJson("sensors");
+  if (json.length() > 0) {
+    if (json.length() <= SETTINGS_JSON_MAX) {
+      DynamicJsonDocument doc(2048);
       deserializeJson(doc, json);
       if (doc.containsKey("supply")) sensorMapping.supply = doc["supply"].as<String>();
       if (doc.containsKey("return")) sensorMapping.return_sensor = doc["return"].as<String>();
@@ -1336,7 +1297,6 @@ void loadSensorMappingFromEEPROM() {
       KLog.println("Sensor mapping loaded from EEPROM");
     }
   }
-  EEPROM.end();
 }
 
 void saveSystemEnabledToEEPROM() {
@@ -1353,7 +1313,8 @@ void loadSystemEnabledFromEEPROM() {
   EEPROM.get(EEPROM_ADDR_MAGIC, magic);
   
   if (magic == EEPROM_MAGIC) {
-    EEPROM.get(EEPROM_ADDR_SYSTEM, systemEnabled);
+    uint8_t stored = EEPROM.read(EEPROM_ADDR_SYSTEM);
+    systemEnabled = stored <= 1 ? stored != 0 : true;
     KLog.print("System enabled loaded from EEPROM: ");
     KLog.println(systemEnabled);
   } else {
@@ -1365,39 +1326,27 @@ void loadSystemEnabledFromEEPROM() {
 
 // Функции работы с настройками WiFi
 void saveWiFiSettingsToEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
   String json;
-  DynamicJsonDocument doc(512);
+  DynamicJsonDocument doc(2048);
   doc["primarySSID"] = wifiSettings.primarySSID;
   doc["primaryPassword"] = wifiSettings.primaryPassword;
   doc["backupSSID"] = wifiSettings.backupSSID;
   doc["backupPassword"] = wifiSettings.backupPassword;
   doc["useBackup"] = wifiSettings.useBackup;
+  doc["antennaTuning"] = wifiSettings.antennaTuning;
   serializeJson(doc, json);
   
-  int len = json.length();
-  EEPROM.put(EEPROM_ADDR_WIFI, len);
-  for (int i = 0; i < len && i < 200; i++) {
-    EEPROM.write(EEPROM_ADDR_WIFI + 4 + i, json[i]);
+  if (doc.overflowed() || !writeSettingsJson("wifi", json)) {
+    settingsStoreError = true;
+    KLog.println("Settings write failed");
   }
-  EEPROM.commit();
-  EEPROM.end();
 }
 
 void loadWiFiSettingsFromEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
-  uint8_t magic = 0;
-  EEPROM.get(EEPROM_ADDR_MAGIC, magic);
-  
-  if (magic == EEPROM_MAGIC) {
-    int len = 0;
-    EEPROM.get(EEPROM_ADDR_WIFI, len);
-    if (len > 0 && len < 250) {
-      String json = "";
-      for (int i = 0; i < len; i++) {
-        json += (char)EEPROM.read(EEPROM_ADDR_WIFI + 4 + i);
-      }
-      DynamicJsonDocument doc(512);
+  String json = readSettingsJson("wifi");
+  if (json.length() > 0) {
+    if (json.length() <= SETTINGS_JSON_MAX) {
+      DynamicJsonDocument doc(2048);
       deserializeJson(doc, json);
       if (doc.containsKey("primarySSID")) wifiSettings.primarySSID = doc["primarySSID"].as<String>();
       if (doc.containsKey("primaryPassword")) wifiSettings.primaryPassword = doc["primaryPassword"].as<String>();
@@ -1407,7 +1356,6 @@ void loadWiFiSettingsFromEEPROM() {
       if (doc.containsKey("antennaTuning")) wifiSettings.antennaTuning = doc["antennaTuning"];
     }
   }
-  EEPROM.end();
 }
 
 
@@ -1580,38 +1528,25 @@ bool connectToWiFi() {
 
 // Функции работы с настройками NTP
 void saveNTPSettingsToEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
   String json;
-  DynamicJsonDocument doc(256);
+  DynamicJsonDocument doc(2048);
   doc["enabled"] = ntpSettings.enabled;
   doc["server"] = ntpSettings.server;
   doc["timezone"] = ntpSettings.timezone;
   doc["updateInterval"] = ntpSettings.updateInterval;
   serializeJson(doc, json);
   
-  int len = json.length();
-  EEPROM.put(EEPROM_ADDR_NTP, len);
-  for (int i = 0; i < len && i < 150; i++) {
-    EEPROM.write(EEPROM_ADDR_NTP + 4 + i, json[i]);
+  if (doc.overflowed() || !writeSettingsJson("ntp", json)) {
+    settingsStoreError = true;
+    KLog.println("Settings write failed");
   }
-  EEPROM.commit();
-  EEPROM.end();
 }
 
 void loadNTPSettingsFromEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
-  uint8_t magic = 0;
-  EEPROM.get(EEPROM_ADDR_MAGIC, magic);
-  
-  if (magic == EEPROM_MAGIC) {
-    int len = 0;
-    EEPROM.get(EEPROM_ADDR_NTP, len);
-    if (len > 0 && len < 200) {
-      String json = "";
-      for (int i = 0; i < len; i++) {
-        json += (char)EEPROM.read(EEPROM_ADDR_NTP + 4 + i);
-      }
-      DynamicJsonDocument doc(256);
+  String json = readSettingsJson("ntp");
+  if (json.length() > 0) {
+    if (json.length() <= SETTINGS_JSON_MAX) {
+      DynamicJsonDocument doc(2048);
       DeserializationError error = deserializeJson(doc, json);
       if (!error) {
         if (doc.containsKey("enabled")) ntpSettings.enabled = doc["enabled"];
@@ -1633,43 +1568,29 @@ void loadNTPSettingsFromEEPROM() {
     KLog.println("EEPROM not initialized, saving default NTP settings");
     saveNTPSettingsToEEPROM();
   }
-  EEPROM.end();
 }
 
 // Сохранение настроек ML в EEPROM
 void saveMLSettingsToEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
-  DynamicJsonDocument doc(128);
+  DynamicJsonDocument doc(2048);
   doc["enabled"] = mlSettings.enabled;
   doc["publishInterval"] = mlSettings.publishInterval;
   
   String json;
   serializeJson(doc, json);
   
-  int len = json.length();
-  EEPROM.put(EEPROM_ADDR_ML, len);
-  for (int i = 0; i < len; i++) {
-    EEPROM.write(EEPROM_ADDR_ML + 4 + i, json[i]);
+  if (doc.overflowed() || !writeSettingsJson("ml", json)) {
+    settingsStoreError = true;
+    KLog.println("Settings write failed");
   }
-  EEPROM.commit();
-  EEPROM.end();
 }
 
 // Загрузка настроек ML из EEPROM
 void loadMLSettingsFromEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
-  uint8_t magic = 0;
-  EEPROM.get(EEPROM_ADDR_MAGIC, magic);
-  
-  if (magic == EEPROM_MAGIC) {
-    int len = 0;
-    EEPROM.get(EEPROM_ADDR_ML, len);
-    if (len > 0 && len < 200) {
-      String json = "";
-      for (int i = 0; i < len; i++) {
-        json += (char)EEPROM.read(EEPROM_ADDR_ML + 4 + i);
-      }
-      DynamicJsonDocument doc(128);
+  String json = readSettingsJson("ml");
+  if (json.length() > 0) {
+    if (json.length() <= SETTINGS_JSON_MAX) {
+      DynamicJsonDocument doc(2048);
       DeserializationError error = deserializeJson(doc, json);
       if (!error) {
         if (doc.containsKey("enabled")) mlSettings.enabled = doc["enabled"];
@@ -1694,14 +1615,12 @@ void loadMLSettingsFromEEPROM() {
     KLog.println("EEPROM not initialized, saving default ML settings (enabled=true)");
     saveMLSettingsToEEPROM();
   }
-  EEPROM.end();
 }
 
 // Сохранение настроек реле в EEPROM
 void saveRelaySettingsToEEPROM() {
   esp_task_wdt_reset();
-  EEPROM.begin(EEPROM_SIZE);
-  DynamicJsonDocument doc(256);
+  DynamicJsonDocument doc(2048);
   doc["fanOffIsLow"] = relaySettings.fanOffIsLow;
   doc["pumpOffIsLow"] = relaySettings.pumpOffIsLow;
   doc["sensorsOffIsLow"] = relaySettings.sensorsOffIsLow;
@@ -1714,35 +1633,18 @@ void saveRelaySettingsToEEPROM() {
   KLog.print("[Реле] Сохранение в EEPROM: ");
   KLog.println(json);
   
-  int len = json.length();
-  EEPROM.put(EEPROM_ADDR_RELAY, len);
-  for (int i = 0; i < len && i < 200; i++) {
-    EEPROM.write(EEPROM_ADDR_RELAY + 4 + i, json[i]);
+  if (doc.overflowed() || !writeSettingsJson("relay", json)) {
+    settingsStoreError = true;
+    KLog.println("Settings write failed");
   }
-  
-  if (EEPROM.commit()) {
-    KLog.println("[Реле] Настройки успешно сохранены в EEPROM");
-  } else {
-    KLog.println("[Реле] ОШИБКА: Не удалось сохранить в EEPROM!");
-  }
-  EEPROM.end();
 }
 
 // Загрузка настроек реле из EEPROM
 void loadRelaySettingsFromEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
-  uint8_t magic = 0;
-  EEPROM.get(EEPROM_ADDR_MAGIC, magic);
-  
-  if (magic == EEPROM_MAGIC) {
-    int len = 0;
-    EEPROM.get(EEPROM_ADDR_RELAY, len);
-    if (len > 0 && len < 200) {
-      String json = "";
-      for (int i = 0; i < len; i++) {
-        json += (char)EEPROM.read(EEPROM_ADDR_RELAY + 4 + i);
-      }
-      DynamicJsonDocument doc(256);
+  String json = readSettingsJson("relay");
+  if (json.length() > 0) {
+    if (json.length() <= SETTINGS_JSON_MAX) {
+      DynamicJsonDocument doc(2048);
       DeserializationError error = deserializeJson(doc, json);
       if (!error) {
         KLog.print("[Реле] Загружено из EEPROM: ");
@@ -1783,13 +1685,11 @@ void loadRelaySettingsFromEEPROM() {
     KLog.println("EEPROM not initialized, saving default relay settings");
     saveRelaySettingsToEEPROM();
   }
-  EEPROM.end();
 }
 
 // Сохранение настроек комфорт в EEPROM
 void saveComfortSettingsToEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
-  DynamicJsonDocument doc(512);
+  DynamicJsonDocument doc(2048);
   doc["targetHomeTemp"] = comfortSettings.targetHomeTemp;
   doc["minBoilerTemp"] = comfortSettings.minBoilerTemp;
   doc["maxBoilerTemp"] = comfortSettings.maxBoilerTemp;
@@ -1807,30 +1707,18 @@ void saveComfortSettingsToEEPROM() {
   String json;
   serializeJson(doc, json);
   
-  int len = json.length();
-  EEPROM.put(EEPROM_ADDR_COMFORT, len);
-  for (int i = 0; i < len && i < 250; i++) {
-    EEPROM.write(EEPROM_ADDR_COMFORT + 4 + i, json[i]);
+  if (doc.overflowed() || !writeSettingsJson("comfort", json)) {
+    settingsStoreError = true;
+    KLog.println("Settings write failed");
   }
-  EEPROM.commit();
-  EEPROM.end();
 }
 
 // Загрузка настроек комфорт из EEPROM
 void loadComfortSettingsFromEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
-  uint8_t magic = 0;
-  EEPROM.get(EEPROM_ADDR_MAGIC, magic);
-  
-  if (magic == EEPROM_MAGIC) {
-    int len = 0;
-    EEPROM.get(EEPROM_ADDR_COMFORT, len);
-    if (len > 0 && len < 250) {
-      String json = "";
-      for (int i = 0; i < len; i++) {
-        json += (char)EEPROM.read(EEPROM_ADDR_COMFORT + 4 + i);
-      }
-      DynamicJsonDocument doc(512);
+  String json = readSettingsJson("comfort");
+  if (json.length() > 0) {
+    if (json.length() <= SETTINGS_JSON_MAX) {
+      DynamicJsonDocument doc(2048);
       DeserializationError error = deserializeJson(doc, json);
       if (!error) {
         if (doc.containsKey("targetHomeTemp")) {
@@ -1888,7 +1776,6 @@ void loadComfortSettingsFromEEPROM() {
       }
     }
   }
-  EEPROM.end();
 }
 
 // Сохранение режима работы в EEPROM
@@ -1926,6 +1813,7 @@ void loadWorkModeFromEEPROM() {
 // Сохранение счетчика перезагрузок в EEPROM
 void saveBootCountToEEPROM() {
   EEPROM.begin(EEPROM_SIZE);
+  EEPROM.put(EEPROM_ADDR_MAGIC, (uint8_t)EEPROM_MAGIC);
   EEPROM.put(EEPROM_ADDR_BOOT_COUNT, bootCount);
   EEPROM.commit();
   EEPROM.end();
@@ -1941,6 +1829,7 @@ void loadBootCountFromEEPROM() {
   
   if (magic == EEPROM_MAGIC) {
     EEPROM.get(EEPROM_ADDR_BOOT_COUNT, bootCount);
+    if (bootCount == UINT32_MAX) bootCount = 0;
     KLog.print("[Boot] Boot count loaded from EEPROM: ");
     KLog.println(bootCount);
   } else {
@@ -1970,19 +1859,23 @@ String getResetReasonString() {
 
 // Загрузка журнала перезагрузок из EEPROM
 void loadBootLogFromEEPROM() {
+  EEPROM.begin(EEPROM_SIZE);
   EEPROM.get(EEPROM_ADDR_BOOT_LOG, bootLog);
   
   // Находим индекс последней записи
   bootLogWriteIndex = 0;
   for (int i = 0; i < BOOT_LOG_MAX_ENTRIES; i++) {
+    if (bootLog[i].bootCount == UINT32_MAX || bootLog[i].reason[0] == char(0xff)) bootLog[i].valid = false;
     if (bootLog[i].valid) {
       bootLogWriteIndex = (i + 1) % BOOT_LOG_MAX_ENTRIES;
     }
   }
+  EEPROM.end();
 }
 
 // Сохранение записи в журнал перезагрузок
 void saveBootLogEntry() {
+  EEPROM.begin(EEPROM_SIZE);
   BootLogEntry entry;
   entry.bootCount = bootCount;
   entry.timestamp = (ntpSettings.enabled && timeClient.isTimeSet()) ? timeClient.getEpochTime() : 0;
@@ -2001,6 +1894,7 @@ void saveBootLogEntry() {
   KLog.print(entry.bootCount);
   KLog.print(", reason=");
   KLog.println(entry.reason);
+  EEPROM.end();
 }
 
 // API: Получение журнала перезагрузок
@@ -2043,11 +1937,13 @@ void handleBootCountReset() {
   saveBootCountToEEPROM();
   
   // Очищаем журнал
+  EEPROM.begin(EEPROM_SIZE);
   for (int i = 0; i < BOOT_LOG_MAX_ENTRIES; i++) {
     bootLog[i].valid = false;
     EEPROM.put(EEPROM_ADDR_BOOT_LOG + i * BOOT_LOG_ENTRY_SIZE, bootLog[i]);
   }
   EEPROM.commit();
+  EEPROM.end();
   bootLogWriteIndex = 0;
   
   DynamicJsonDocument doc(128);
@@ -2474,12 +2370,15 @@ void handleHistory() {
 
 // Сохранение статистики вентилятора в EEPROM
 void saveFanStatsToEEPROM() {
+  EEPROM.begin(EEPROM_SIZE);
   EEPROM.put(EEPROM_ADDR_FAN_STATS, fanStats);
   EEPROM.commit();
+  EEPROM.end();
 }
 
 // Загрузка статистики вентилятора из EEPROM
 void loadFanStatsFromEEPROM() {
+  EEPROM.begin(EEPROM_SIZE);
   EEPROM.get(EEPROM_ADDR_FAN_STATS, fanStats);
   // Проверяем валидность
   if (fanStats.totalWorkTime > 1000000000UL) {  // Нереалистичное значение
@@ -2489,6 +2388,7 @@ void loadFanStatsFromEEPROM() {
     fanStats.cycleCount = 0;
     fanStats.dailyCycleCount = 0;
   }
+  EEPROM.end();
 }
 
 static float ignitionHeatC(bool* fromBoiler);
@@ -2530,6 +2430,7 @@ void startIgnition() {
 
 // Проверка погасания котла
 void checkBoilerExtinguished(unsigned long now) {
+  if (!supplyGuard.seen || uint32_t(now - supplyGuard.lastGood) > SupplyGuard::sampleGapMs) return;
   if (!fanState || boilerExtinguished) {
     return;
   }
@@ -2585,10 +2486,12 @@ void checkBoilerExtinguished(unsigned long now) {
 
 // Проверка прогресса розжига
 void checkIgnitionProgress(unsigned long now) {
+  if (supplyGuard.fault || otaSafeMode) return;
   if (!ignitionInProgress) {
     return;
   }
   
+  if (systemEnabled && !coalFeedingActive) setFanDesired(true);
   unsigned long ignitionElapsed = (now >= ignitionStartTime) ? (now - ignitionStartTime) : (ULONG_MAX - ignitionStartTime + now);
   float tempIncrease = supplyTemp - ignitionStartTemp;
   
@@ -2724,20 +2627,9 @@ String getFormattedDate() {
 
 // Валидность температуры подачи (не «замороженные» 0/85 DS18B20 и не мусор)
 bool isSupplyTempValid() {
-  if (supplyTemp <= -20.0f || supplyTemp >= 120.0f) {
-    return false;
-  }
-  // Классические маркеры зависания DS18B20
-  if (supplyTemp > -0.15f && supplyTemp < 0.15f) {
-    return false;
-  }
-  if (supplyTemp > 84.5f && supplyTemp < 85.5f) {
-    return false;
-  }
-  if (lastValidSupplyTempTime == 0) {
-    return false;
-  }
-  return true;
+  return supplyGuard.seen && !supplyGuard.fault &&
+         uint32_t(millis() - supplyGuard.lastGood) <= SupplyGuard::timeoutMs &&
+         SupplyGuard::validReading(supplyTemp);
 }
 
 // При остановленном котле насосы крутятся, если улица ниже −5 °C
@@ -2754,23 +2646,8 @@ bool outdoorForcesPumps() {
   return outdoorTemp < PUMP_FROST_OUTDOOR_C;
 }
 
-static bool boilerTempUsable() {
-  if (lastValidBoilerTempTime == 0) return false;
-  if (boilerTemp <= 0.5f || boilerTemp >= 120.0f) return false;
-  if (boilerTemp > 84.5f && boilerTemp < 85.5f) return false;
-  unsigned long now = millis();
-  unsigned long age = (now >= lastValidBoilerTempTime)
-    ? (now - lastValidBoilerTempTime)
-    : (ULONG_MAX - lastValidBoilerTempTime + now);
-  return age < OUTDOOR_SENSOR_STALE_MS;
-}
-
-// Температура «котла» для порога насосов. Если датчик котла молчит — подача.
+// Same sensor as the web card "Подача": sensorMapping.supply -> supplyTemp.
 static float ignitionHeatC(bool* fromBoiler) {
-  if (boilerTempUsable()) {
-    if (fromBoiler) *fromBoiler = true;
-    return boilerTemp;
-  }
   if (fromBoiler) *fromBoiler = false;
   if (isSupplyTempValid()) return supplyTemp;
   return -100.0f;
@@ -3038,6 +2915,7 @@ void applySystemEnable(bool enable, const char* source) {
 
 // Логика насоса: обычный режим + выбег после выкл + защита при росте подачи + контуры
 void updatePumpLogic(unsigned long now) {
+  if (otaSafeMode) { forceOtaOutputs(); return; }
   if (ignitionPumpHold) {
     serviceIgnitionPumps(now);
     return;
@@ -3189,13 +3067,17 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   // Обработка установки уставки
   String setpointTopic = mqttSettings.prefix + "/setpoint/set";
   if (topicStr == setpointTopic) {
+    if (mqttClient.messageRetained()) {
+      logEvent("SETPOINT", "MQTT retained ignored");
+      return;
+    }
     float newSetpoint = message.toFloat();
     if (newSetpoint >= 40 && newSetpoint <= 80) {
       setpoint = newSetpoint;
       autoSettings.setpoint = newSetpoint;
       saveAutoSettingsToEEPROM();
-      char det[24];
-      snprintf(det, sizeof(det), "Уставка %.1f°C MQTT", setpoint);
+      char det[50];
+      snprintf(det, sizeof(det), "MQTT set=%.1fC", setpoint);
       logEvent("SETPOINT", det);
       // Publish вне callback — через флаг в loop (см. setpointMqttPending)
       setpointMqttPending = true;
@@ -3424,7 +3306,7 @@ void publishMqttState() {
   doc["circuit2Enabled"] = circuit2Enabled;
   doc["systemEnabled"] = systemEnabled;
   doc["pumpCoastActive"] = pumpCoastActive;
-  doc["state"] = systemState;
+  doc["state"] = supplyGuard.fault ? "SENSOR_FAULT" : systemState;
   doc["wifiRSSI"] = WiFi.RSSI();
   doc["wifiSSID"] = WiFi.SSID();
   doc["wifiIP"] = WiFi.localIP().toString();
@@ -3547,7 +3429,7 @@ void publishMqttML() {
   doc["circuit1Enabled"] = circuit1Enabled;
   doc["circuit2Enabled"] = circuit2Enabled;
   doc["systemEnabled"] = systemEnabled;
-  doc["state"] = systemState;
+  doc["state"] = supplyGuard.fault ? "SENSOR_FAULT" : systemState;
   
   // 2.1. Режим работы
   doc["workMode"] = workMode;  // 0 = Авто, 1 = Комфорт
@@ -3624,26 +3506,12 @@ void publishMqttML() {
 
 // Обработка поворота энкодера для изменения уставки
 void handleEncoderRotation() {
-  if (encoderPosition != lastEncoderPosition) {
-    int delta = encoderPosition - lastEncoderPosition;
-    
-    // Улучшенная нормализация: обрабатываем все шаги, но ограничиваем максимальную скорость
-    // Это делает работу более плавной и отзывчивой
-    int normalizedDelta = 0;
-    
-    // Ограничиваем максимальную дельту за один раз (защита от пропусков)
-    if (abs(delta) > 3) {
-      // Если дельта слишком большая - нормализуем до ±3
-      normalizedDelta = (delta > 0) ? 3 : -3;
-    } else {
-      // Используем реальную дельту (до 3 шагов)
-      normalizedDelta = delta;
-    }
-    
-    // Обновляем позицию на нормализованную дельту
-    lastEncoderPosition += normalizedDelta;
-    encoderPosition = lastEncoderPosition;
-    
+  portENTER_CRITICAL(&encoderMux);
+  int delta = encoderLocked ? 0 : encoderPosition;
+  encoderPosition = 0;
+  portEXIT_CRITICAL(&encoderMux);
+  if (delta != 0) {
+    int normalizedDelta = delta > 3 ? 3 : (delta < -3 ? -3 : delta);
     // Изменяем уставку с учетом нормализованной дельты (шаг 0.5 градуса на один клик)
     float newSetpoint = setpoint + (normalizedDelta * 0.5);
     
@@ -3665,8 +3533,8 @@ void handleEncoderRotation() {
       String simpleTopic = mqttSettings.prefix + "/simple/setpoint";
       mqttClient.publish(simpleTopic.c_str(), String(setpoint, 1).c_str(), false);
     }
-    char det[24];
-    snprintf(det, sizeof(det), "Уставка %.1f°C энкодер", setpoint);
+    char det[50];
+    snprintf(det, sizeof(det), "ENC set=%.1fC", setpoint);
     logEvent("SETPOINT", det);
     
     lastEncoderRotation = millis(); // Запоминаем время поворота
@@ -3675,27 +3543,43 @@ void handleEncoderRotation() {
 
 // Обработка кнопки энкодера - подброс угля (переключатель)
 void handleEncoderButton() {
-  // Читаем состояние кнопки (LOW = нажата, т.к. INPUT_PULLUP)
-  bool currentButtonState = (digitalRead(PIN_ENCODER_SW) == LOW);
-  
-  // Статические переменные для обработки кнопки
+  const unsigned long currentTime = millis();
+  const bool raw = digitalRead(PIN_ENCODER_SW) == LOW;
+  static bool previousRaw = false, stable = false, armed = false;
+  static unsigned long rawChangedAt = 0, generation = 0;
   static unsigned long buttonPressStartTime = 0;
-  static bool buttonWasPressed = false;
-  static bool buttonHandled = false;
-  static bool longPressHandled = false;
-  
-  const unsigned long BUTTON_DEBOUNCE_MS = 20;  // Время дребезга контактов
-  const unsigned long BUTTON_MIN_PRESS_MS = 30;  // Минимальное время нажатия для регистрации
-  const unsigned long BUTTON_MIN_INTERVAL_MS = 200;  // Минимальный интервал между нажатиями
-  const unsigned long BUTTON_LONG_PRESS_MS = 3000;  // Время удержания для запуска розжига (3 секунды)
-  
-  unsigned long currentTime = millis();
-  
+  static bool buttonWasPressed = false, buttonHandled = false, longPressHandled = false;
+  static bool cancelled = false;
+  if (encoderLocked || generation != encoderResetGeneration) {
+    generation = encoderResetGeneration;
+    previousRaw = raw; stable = raw; rawChangedAt = currentTime;
+    armed = false; buttonWasPressed = false; cancelled = true;
+    return;
+  }
+  if (raw != previousRaw) { previousRaw = raw; rawChangedAt = currentTime; }
+  if (currentTime - rawChangedAt < 80) return;
+  stable = raw;
+  if (!armed) {
+    if (!stable) armed = true;
+    return;
+  }
+  unsigned long activity;
+  portENTER_CRITICAL(&encoderMux);
+  activity = encoderActivity;
+  portEXIT_CRITICAL(&encoderMux);
+  bool rotationQuiet = currentTime - activity >= 2000;
+  if (buttonWasPressed && !rotationQuiet) cancelled = true;
+  bool currentButtonState = stable;
+  const unsigned long BUTTON_MIN_PRESS_MS = 200;
+  const unsigned long BUTTON_MIN_INTERVAL_MS = 500;
+  const unsigned long BUTTON_LONG_PRESS_MS = 3000;
+
   // Обработка нажатия кнопки
   if (currentButtonState) {
     // Кнопка нажата
     if (!buttonWasPressed) {
       // Кнопка только что нажата - запоминаем время
+      cancelled = !rotationQuiet;
       buttonPressStartTime = currentTime;
       buttonWasPressed = true;
       buttonHandled = false;
@@ -3703,7 +3587,7 @@ void handleEncoderButton() {
     } else {
       // Кнопка удерживается - проверяем длительное нажатие
       unsigned long pressDuration = currentTime - buttonPressStartTime;
-      if (pressDuration >= BUTTON_LONG_PRESS_MS && !longPressHandled) {
+      if (pressDuration >= BUTTON_LONG_PRESS_MS && !longPressHandled && !cancelled && rotationQuiet) {
         // Длительное нажатие (3 секунды) - явный запуск розжига
         longPressHandled = true;
         if (systemState == "COAL_BURNED" || systemState == "HEATING_TIMEOUT") {
@@ -3729,7 +3613,7 @@ void handleEncoderButton() {
       
       // Проверяем минимальное время нажатия (защита от дребезга)
       // Короткое нажатие обрабатываем только если не было длительного
-      if (pressDuration >= BUTTON_MIN_PRESS_MS && 
+      if (!cancelled && rotationQuiet && pressDuration >= BUTTON_MIN_PRESS_MS && 
           pressDuration < BUTTON_LONG_PRESS_MS &&
           !buttonHandled &&
           !longPressHandled &&
@@ -3871,6 +3755,69 @@ void handleSerialCommands() {
 }
 
 // --- Actuator layer: единая точка GPIO для FAN / PUMP / PUMP2 ---
+// A sensor outage pauses heating without changing the user's system enable flag.
+void serviceSupplyGuard(unsigned long now) {
+  supplyGuard.tick(now);
+  if (supplyGuard.fault && !supplyFaultApplied) {
+    supplyFaultApplied = true;
+    supplyFaultFanWasOn = fanState;
+    supplyFaultStart = now;
+    manualFanControl = false;
+    setFanDesired(false);
+    logEvent("SENSOR_FAULT", "Подача: нет данных >5 мин");
+  } else if (!supplyGuard.fault && supplyFaultApplied) {
+    supplyFaultApplied = false;
+    if (ignitionInProgress) ignitionStartTime += uint32_t(now - supplyFaultStart);
+    heatingStartTime = 0;
+    lastFanToggleTime = 0;
+    supplyHistory = {{0}, 0, 0, 0, false};
+    addToHistory(&supplyHistory, supplyTemp);
+    logEvent("SENSOR_RESTORED", "Подача стабильна 60 с");
+    // Restore demand, never a disabled system, a latched stop or an overheat.
+    float limit = workMode == 1 ? comfortSettings.warningTemp : autoSettings.overheatTemp;
+    if (supplyFaultFanWasOn && systemEnabled && !coalFeedingActive && !isFaultStopState() &&
+        supplyTemp < limit && (ignitionInProgress || supplyTemp < autoSettings.setpoint + autoSettings.hysteresis)) {
+      setFanDesired(true);
+      heatingStartTime = now;
+    }
+    supplyFaultFanWasOn = false;
+  }
+}
+
+void forceOtaOutputs() {
+  // OTA overrides manual mode, circuit disables and ignition hold.
+  manualFanControl = manualPumpControl = manualPump2Control = false;
+  clearIgnitionPumpHold();
+  pumpCircuitApplyPending = false;
+  pump2StaggerPending = false;
+  setFanDesired(false);
+  setPumpDesired(true);
+  setPump2Desired(true);
+  writeActuatorGpios();
+}
+
+static unsigned long otaSafeStarted = 0;
+void beginOtaSafeMode() {
+  if (otaSafeMode) return;
+  otaSafeMode = true;
+  otaSafeStarted = millis();
+  forceOtaOutputs();
+  logEvent("OTA_SAFE", "Вент выкл, оба насоса вкл");
+}
+void endOtaSafeMode() {
+  if (!otaSafeMode) return;
+  otaSafeMode = false;
+  if (ignitionInProgress) ignitionStartTime += uint32_t(millis() - otaSafeStarted);
+  heatingStartTime = 0;
+  lastFanToggleTime = 0;
+  // Resume through the normal control loop, after it checks sensor health.
+}
+struct OtaSafeSession {
+  bool owner;
+  OtaSafeSession() : owner(!otaSafeMode) { if (owner) beginOtaSafeMode(); }
+  ~OtaSafeSession() { if (owner) endOtaSafeMode(); }
+};
+
 void beginFanCycle(unsigned long now) {
   fanStartTime = now;
   maxTempDuringFan = isSupplyTempValid() ? supplyTemp : 0.0f;
@@ -3884,6 +3831,7 @@ void endFanCycle() {
 }
 
 void writeActuatorGpios() {
+  if (supplyGuard.fault || otaSafeMode) fanState = false;
   int fanLevel = fanState ? HIGH : (relaySettings.fanOffIsLow ? LOW : HIGH);
   digitalWrite(PIN_RELAY_FAN, fanLevel);
 
@@ -3898,6 +3846,8 @@ void writeActuatorGpios() {
 }
 
 void setFanDesired(bool on) {
+  if (on && (supplyGuard.fault || otaSafeMode)) on = false;
+  if (on && isSupplyTempValid() && supplyTemp >= (workMode == 1 ? comfortSettings.warningTemp : autoSettings.overheatTemp)) on = false;
   if (fanState == on) {
     if (on && fanStartTime == 0) {
       beginFanCycle(millis());
@@ -4031,6 +3981,8 @@ void applyPumpCircuitOutputs(bool demand, bool forceSafety) {
 
 // Функция синхронизации состояния реле с переменными
 void syncRelays() {
+  if (otaSafeMode) { forceOtaOutputs(); return; }
+  if (supplyGuard.fault && fanState) setFanDesired(false);
   // Проверка таймаута ручного управления (2 минуты)
   if (lastManualControlTime > 0) {
     unsigned long elapsed = millis() - lastManualControlTime;
@@ -4052,7 +4004,7 @@ void syncRelays() {
   }
 
   // Safety: ручной вентилятор не должен работать при перегреве
-  if (manualFanControl && fanState && isSupplyTempValid()) {
+  if (fanState && isSupplyTempValid()) {
     float ohLimit = (workMode == 1) ? comfortSettings.warningTemp : autoSettings.overheatTemp;
     if (supplyTemp >= ohLimit) {
       KLog.println("[Безопасность] Ручной вентилятор принудительно ВЫКЛ (перегрев)");
@@ -4446,48 +4398,31 @@ void publishCircuitsMqtt() {
   circuitsMqttPending = false;
 }
 
-// HTML UI: предпочитаем gzip (~34KB вместо ~224KB), иначе сырой index с chunked+yield
+// Web UI travels with firmware; keep SPIFFS settings, history and logs intact.
+#include "WebUi.h"
 void handleWebInterface() {
-  File file = SPIFFS.open("/index.html.gz", "r");
-  if (file && file.size() > 0) {
-    bool ok = streamFileChunked(file, "text/html; charset=utf-8", true);
-    file.close();
-    if (ok) {
-      return;
-    }
-  } else if (file) {
-    file.close();
+  server.sendHeader("Cache-Control", "no-cache, must-revalidate");
+  server.sendHeader("Connection", "close");
+  server.sendHeader("Content-Encoding", "gzip");
+  server.setContentLength(sizeof(WEB_UI_GZIP));
+  server.send(200, "text/html; charset=utf-8", "");
+  WiFiClient client = server.client();
+  size_t offset = 0;
+  unsigned long lastProgress = millis();
+  while (offset < sizeof(WEB_UI_GZIP) && client.connected()) {
+    size_t count = sizeof(WEB_UI_GZIP) - offset;
+    if (count > 512) count = 512;
+    size_t written = client.write(WEB_UI_GZIP + offset, count);
+    if (written) { offset += written; lastProgress = millis(); }
+    else if (millis() - lastProgress > 2000) { client.stop(); break; }
+    delay(1);
+    esp_task_wdt_reset();
   }
-
-  file = SPIFFS.open("/index.html", "r");
-  if (file && file.size() > 0) {
-    streamFileChunked(file, "text/html; charset=utf-8", false);
-    file.close();
-    return;
-  }
-  if (file) {
-    file.close();
-  }
-
-  // Fallback: пустой/битый SPIFFS — форма загрузки index.html
-  bool isAPMode = (WiFi.getMode() == WIFI_AP || WiFi.getMode() == WIFI_AP_STA);
-  String ipStr = isAPMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
-  String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-                "<title>Котел</title><style>body{font-family:sans-serif;max-width:420px;margin:2rem auto;padding:0 1rem}"
-                "code{background:#eee;padding:2px 6px;border-radius:4px}</style></head><body>"
-                "<h1>SPIFFS пуст</h1><p>Прошивка работает, веб-UI не в файловой системе.</p>"
-                "<p>IP: <code>" + ipStr + "</code> · FW " + String(FIRMWARE_VERSION) + "</p>"
-                "<p>API: <a href='/api/status'>/api/status</a></p>"
-                "<form method='POST' action='/api/fs/index' enctype='multipart/form-data'>"
-                "<p><input type='file' name='file' accept='.html,.gz,text/html' required></p>"
-                "<p><button type='submit'>Загрузить index.html или .gz</button></p></form>"
-                "</body></html>";
-  server.send(200, "text/html; charset=utf-8", html);
 }
 
-// API: Получение статуса
 void handleStatus() {
-  DynamicJsonDocument doc(2048);
+  DynamicJsonDocument doc(3072);
+  doc["encoderLocked"] = encoderLocked;
   doc["supplyTemp"] = supplyTemp;
   doc["returnTemp"] = returnTemp;
   doc["boilerTemp"] = boilerTemp;
@@ -4495,18 +4430,26 @@ void handleStatus() {
   doc["hysteresis"] = autoSettings.hysteresis;
   doc["homeTemp"] = homeTemp;  // Температура в доме (от ESP01)
   doc["setpoint"] = setpoint;
+  // Settings can be applied to the running controller while NVS retries a write.
+  doc["setpointPersisted"] = !autoSettingsDirty;
   doc["fan"] = fanState;
   doc["pump"] = pumpState;
   doc["pump2"] = pump2State;
   doc["circuit1Enabled"] = circuit1Enabled;
   doc["circuit2Enabled"] = circuit2Enabled;
   doc["systemEnabled"] = systemEnabled;
-  doc["state"] = systemState;
+  doc["state"] = supplyGuard.fault ? "SENSOR_FAULT" : systemState;
   doc["workMode"] = workMode;
   doc["workModeName"] = (workMode == 0) ? "Авто" : "Комфорт";
   doc["homeTempSensorValid"] = isHomeTempSensorValid(millis());  // Статус датчика температуры дома
   doc["homeTempSensorLWTOnline"] = homeTempSensorLWTOnline;  // LWT статус датчика (online/offline)
   doc["supplyTempValid"] = isSupplyTempValid();
+  doc["supplySensorFault"] = supplyGuard.fault;
+  doc["supplyRecoveryStable"] = supplyGuard.stabilizing;
+  doc["supplyLastGoodAgeMs"] = uint32_t(millis() - supplyGuard.lastGood);
+  doc["otaSafeMode"] = otaSafeMode;
+  doc["settingsStoreError"] = settingsStoreError;
+  doc["settingsMigrationRejected"] = settingsMigrationRejected;
   if (workMode == 1) {
     doc["comfortState"] = comfortState;
     doc["targetHomeTemp"] = comfortSettings.targetHomeTemp;  // Уставка для дома в режиме Комфорт
@@ -4546,7 +4489,7 @@ void handleStatus() {
   doc["boilerExtinguished"] = boilerExtinguished;
   doc["ignitionInProgress"] = ignitionInProgress;
   if (ignitionInProgress) {
-    unsigned long ignitionElapsed = (millis() >= ignitionStartTime) ? (millis() - ignitionStartTime) : (ULONG_MAX - ignitionStartTime + millis());
+      unsigned long ignitionElapsed = (millis() >= ignitionStartTime) ? (millis() - ignitionStartTime) : (ULONG_MAX - ignitionStartTime + millis());
     doc["ignitionElapsed"] = ignitionElapsed / 1000;  // секунды
     doc["ignitionStartTemp"] = ignitionStartTemp;
     doc["ignitionTempIncrease"] = supplyTemp - ignitionStartTemp;
@@ -4680,9 +4623,8 @@ void handleSetpoint() {
       setpoint = value;
       autoSettings.setpoint = value;
       
-      // Отложенное сохранение в EEPROM
-      autoSettingsDirty = true;
-      lastAutoSettingsChange = millis();
+      // Persist before reporting success or doing network work.
+      const bool persisted = saveAutoSettingsToEEPROM();
       
       // Публикация уставки в MQTT (неблокирующая) — оба топика для пушей телефона
       if (mqttSettings.enabled && mqttClient.connected()) {
@@ -4691,12 +4633,16 @@ void handleSetpoint() {
         String simpleTopic = mqttSettings.prefix + "/simple/setpoint";
         mqttClient.publish(simpleTopic.c_str(), String(setpoint, 1).c_str(), false);
       }
-      char det[24];
-      snprintf(det, sizeof(det), "Уставка %.1f°C веб", setpoint);
+      char det[50];
+      snprintf(det, sizeof(det), "WEB set=%.1fC", setpoint);
       logEvent("SETPOINT", det);
       
       DynamicJsonDocument doc(200);
+      // The command is applied in RAM even if NVS is temporarily unavailable.
+      // Report application and persistence separately so MQTT/UI do not disagree.
       doc["success"] = true;
+      doc["persisted"] = persisted;
+      if (!persisted) doc["storageError"] = "Setpoint applied; storage retry pending";
       doc["setpoint"] = setpoint;
       String response;
       serializeJson(doc, response);
@@ -4718,6 +4664,10 @@ void handleControl() {
     bool manual = server.hasArg("manual") && server.arg("manual").toInt() == 1;  // Инженерное управление
     
     if (device == "fan") {
+      if (state && (supplyGuard.fault || otaSafeMode)) {
+        server.send(409, "application/json", "{\"error\":\"Fan blocked by safety\"}");
+        return;
+      }
       // Safety wins: запрет ручного ВКЛ при перегреве
       if (state && isSupplyTempValid()) {
         float ohLimit = (workMode == 1) ? comfortSettings.warningTemp : autoSettings.overheatTemp;
@@ -5010,7 +4960,14 @@ void handleAutoSettingsGet() {
 void handleAutoSettingsPost() {
   if (server.hasArg("plain")) {
     DynamicJsonDocument doc(1024);
-    deserializeJson(doc, server.arg("plain"));
+    if (deserializeJson(doc, server.arg("plain")) || !doc.is<JsonObject>() ||
+        (doc.containsKey("setpoint") &&
+         (!doc["setpoint"].is<float>() ||
+          !isfinite(doc["setpoint"].as<float>()) ||
+          doc["setpoint"].as<float>() < 40 || doc["setpoint"].as<float>() > 80))) {
+      server.send(400, "application/json", "{\"error\":\"Invalid settings/setpoint\"}");
+      return;
+    }
     
     if (doc.containsKey("setpoint")) {
       float newSetpoint = doc["setpoint"].as<float>();
@@ -5019,8 +4976,8 @@ void handleAutoSettingsPost() {
         lastFanToggleTime = 0;
         lastFanToggleTemp = supplyTemp;
         KLog.println("[Auto] Setpoint changed - resetting fan toggle timers");
-        char det[24];
-        snprintf(det, sizeof(det), "Уставка %.1f°C настройки", newSetpoint);
+        char det[50];
+        snprintf(det, sizeof(det), "SETTINGS set=%.1fC", newSetpoint);
         logEvent("SETPOINT", det);
       }
       autoSettings.setpoint = newSetpoint;
@@ -5036,8 +4993,10 @@ void handleAutoSettingsPost() {
     setpoint = autoSettings.setpoint;
     
     // Сохраняем сразу при изменении через веб-интерфейс (это редкая операция)
-    saveAutoSettingsToEEPROM();
-    
+    if (!saveAutoSettingsToEEPROM()) {
+      server.send(503, "application/json", "{\"success\":false,\"error\":\"Storage failed; retry pending\"}");
+      return;
+    }
     server.send(200, "application/json", "{\"success\":true}");
   } else {
     server.send(400, "application/json", "{\"error\":\"Invalid request\"}");
@@ -5273,7 +5232,7 @@ void handleIgnition() {
     doc["success"] = true;
     doc["message"] = "Розжиг запущен";
     doc["systemEnabled"] = systemEnabled;
-    doc["state"] = systemState;
+    doc["state"] = supplyGuard.fault ? "SENSOR_FAULT" : systemState;
     String response;
     serializeJson(doc, response);
     server.send(200, "application/json", response);
@@ -5404,7 +5363,7 @@ void handleSystemControl() {
     DynamicJsonDocument doc(256);
     doc["success"] = true;
     doc["systemEnabled"] = systemEnabled;
-    doc["state"] = systemState;
+    doc["state"] = supplyGuard.fault ? "SENSOR_FAULT" : systemState;
     doc["pumpCoastActive"] = pumpCoastActive;
     if (enable && (systemState == "РОЗЖИГ" || ignitionInProgress)) {
       doc["message"] = "Розжиг запущен";
@@ -5803,6 +5762,9 @@ void handleSensorsMappingPost() {
     if (sensorMapping.supply != oldSupply) {
       lastValidSupplyTempTime = 0;
       supplyTemp = 0.0;
+      supplyGuard.sample(millis(), 0, false);
+      supplyGuard.seen = false;
+      supplyHistory = {{0}, 0, 0, 0, false};
       KLog.println("[Привязка датчиков] Сброшен датчик подачи");
     }
     if (sensorMapping.return_sensor != oldReturn) {
@@ -5831,9 +5793,8 @@ void handleSensorsMappingPost() {
 
 // Функции для работы с обновлениями через GitHub
 void saveUpdateSettingsToEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
   String json;
-  DynamicJsonDocument doc(1024);
+  DynamicJsonDocument doc(2048);
   doc["autoCheckEnabled"] = updateSettings.autoCheckEnabled;
   doc["checkInterval"] = updateSettings.checkInterval;
   JsonObject tunnel = doc.createNestedObject("tunnel");
@@ -5847,30 +5808,18 @@ void saveUpdateSettingsToEEPROM() {
   tunnel["tunnelName"] = tunnelSettings.tunnelName;
   serializeJson(doc, json);
   
-  int len = json.length();
-  EEPROM.put(EEPROM_ADDR_UPDATE, len);
-  for (int i = 0; i < len; i++) {
-    EEPROM.write(EEPROM_ADDR_UPDATE + 4 + i, json[i]);
+  if (doc.overflowed() || !writeSettingsJson("update", json)) {
+    settingsStoreError = true;
+    KLog.println("Settings write failed");
   }
-  EEPROM.commit();
-  EEPROM.end();
   KLog.println("Update settings saved to EEPROM");
 }
 
 void loadUpdateSettingsFromEEPROM() {
-  EEPROM.begin(EEPROM_SIZE);
-  uint8_t magic = 0;
-  EEPROM.get(EEPROM_ADDR_MAGIC, magic);
-  
-  if (magic == EEPROM_MAGIC) {
-    int len = 0;
-    EEPROM.get(EEPROM_ADDR_UPDATE, len);
-    if (len > 0 && len < 250) {
-      String json = "";
-      for (int i = 0; i < len; i++) {
-        json += (char)EEPROM.read(EEPROM_ADDR_UPDATE + 4 + i);
-      }
-      DynamicJsonDocument doc(1024);
+  String json = readSettingsJson("update");
+  if (json.length() > 0) {
+    if (json.length() <= SETTINGS_JSON_MAX) {
+      DynamicJsonDocument doc(2048);
       deserializeJson(doc, json);
       if (doc.containsKey("autoCheckEnabled")) updateSettings.autoCheckEnabled = doc["autoCheckEnabled"];
       if (doc.containsKey("checkInterval")) updateSettings.checkInterval = doc["checkInterval"];
@@ -5887,7 +5836,6 @@ void loadUpdateSettingsFromEEPROM() {
       }
     }
   }
-  EEPROM.end();
 }
 
 String buildFrpcConfig() {
@@ -6009,21 +5957,33 @@ void handleUpdateAck() {
   server.send(200, "application/json", response);
 }
 
-static bool parseVer3(const char* s, int& maj, int& min, int& pat) {
-  maj = min = pat = -1;
-  if (!s) return false;
-  int n = sscanf(s, "%d.%d.%d", &maj, &min, &pat);
-  return n == 3 && maj >= 0 && min >= 0 && pat >= 0;
+// Only a complete numeric version is accepted; HTML/error responses are not versions.
+bool isNewerVersion(const String& remote, const String& current) {
+  OtaVersion r,c;
+  return parseOtaVersion(remote.c_str(),r) && parseOtaVersion(current.c_str(),c)
+    && compareOtaVersion(r,c)>0;
 }
 
-// Строго новее. Пустая, кривая или более старая строка обновлением не считается.
-bool isNewerVersion(const String& remote, const String& current) {
-  int rMaj, rMin, rPat, cMaj, cMin, cPat;
-  if (!parseVer3(remote.c_str(), rMaj, rMin, rPat)) return false;
-  if (!parseVer3(current.c_str(), cMaj, cMin, cPat)) return false;
-  if (rMaj != cMaj) return rMaj > cMaj;
-  if (rMin != cMin) return rMin > cMin;
-  return rPat > cPat;
+void reconcileOtaResult(const char* remoteVersion) {
+  if (millis() < 30000UL || updateProgress.isUpdating) return;
+  if (otaResult.status != OTA_RES_FAIL && otaResult.status != OTA_RES_PENDING) return;
+  if (!otaAttemptSuperseded(FIRMWARE_VERSION,otaResult.fromVersion,otaResult.toVersion)) return;
+  const esp_partition_t* running=esp_ota_get_running_partition();
+  esp_ota_img_states_t state;
+  if (!running) return;
+  esp_err_t err=esp_ota_get_state_partition(running,&state);
+  if (err==ESP_OK && state!=ESP_OTA_IMG_VALID && state!=ESP_OTA_IMG_UNDEFINED && state!=ESP_OTA_IMG_NEW) return;
+  if (err!=ESP_OK && err!=ESP_ERR_NOT_FOUND) return;
+  if (!(pumpState || pump2State || (!circuit1Enabled && !circuit2Enabled))) return;
+  // Stock bootloaders without rollback can leave a healthy OTA slot in NEW.
+  if (err==ESP_OK && state==ESP_OTA_IMG_NEW &&
+      esp_ota_mark_app_valid_cancel_rollback()!=ESP_OK) return;
+  String from=otaResult.fromVersion;
+  String target=otaResult.toVersion;
+  logEvent("OTA_RECONCILED", (String("target=")+target+" running="+FIRMWARE_VERSION+
+    " github="+(remoteVersion ? remoteVersion : "not checked")).c_str());
+  saveOtaResult(OTA_RES_SUCCESS,from.c_str(),FIRMWARE_VERSION,
+                "Версия установлена; прежняя ошибка обновления устранена");
 }
 
 // Отдельный namespace: clearOtaResult() чистит "ota" и не должен стирать этот флаг.
@@ -6157,6 +6117,7 @@ void confirmOtaIfHealthy() {
 }
 
 bool downloadSpiffsFromGithub() {
+  OtaSafeSession safeSession;
   WiFiClientSecure client;
   HTTPClient http;
   client.setInsecure();
@@ -6247,17 +6208,11 @@ void servicePendingSpiffs() {
     return;
   }
 
-  KLog.println("[Update] SPIFFS after confirmed app");
-  bool ok = downloadSpiffsFromGithub();
+  // Web UI is embedded in the application. An unrelated GitHub spiffs.bin
+  // must not overwrite the local journal/history after this firmware update.
   clearSpiffsPending();
+  logEvent("OTA", "SPIFFS сохранён: веб встроен в прошивку");
   done = true;
-  if (ok) {
-    logEvent("OTA", "SPIFFS записан");
-    delay(300);
-    ESP.restart();
-  } else {
-    logEvent("OTA", "SPIFFS пропущен");
-  }
 }
 
 // 0 = ещё не проверяли, 1 = есть новее, 2 = уже актуальная, 3 = ошибка связи
@@ -6265,6 +6220,7 @@ static int gUpdateCheckKind = 0;
 
 // Проверка обновлений через GitHub
 String checkForUpdates() {
+  gUpdateCheckKind = 3; // Reset previous successful check before any failure path.
   // Проверяем WiFi соединение
   if (WiFi.status() != WL_CONNECTED) {
     KLog.println("[Update] ERROR: WiFi not connected!");
@@ -6288,7 +6244,7 @@ String checkForUpdates() {
   
   // Пробуем подключиться
   KLog.println("[Update] Initializing HTTP client...");
-  bool beginResult = http.begin(client, GITHUB_VERSION_URL);
+  bool beginResult = http.begin(client, String(GITHUB_VERSION_URL) + "?check=" + String(esp_random(), HEX) + String(millis()));
   
   if (!beginResult) {
     KLog.println("[Update] ERROR: http.begin() returned false");
@@ -6306,6 +6262,7 @@ String checkForUpdates() {
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.addHeader("User-Agent", "ESP32-Kotel/1.0");
   http.addHeader("Accept", "text/plain");
+  http.addHeader("Cache-Control", "no-cache");
   
   KLog.println("[Update] Sending GET request...");
   unsigned long startTime = millis();
@@ -6336,11 +6293,15 @@ String checkForUpdates() {
       return "";
     }
     
-    // Проверяем формат версии (должен быть типа "4.2.1")
-    if (version.indexOf('.') == -1) {
-      KLog.println("[Update] WARNING: Version format seems invalid");
+    OtaVersion parsed;
+    if (!parseOtaVersion(version.c_str(), parsed)) {
+      logEvent("OTA_CHECK", "invalid GitHub version");
+      http.end();
+      gUpdateCheckKind = 3;
+      return "";
     }
-    
+    reconcileOtaResult(version.c_str());
+
     // Только строго более новая версия. Иначе GitHub 4.2.42 предлагается поверх 4.2.43.
     if (isNewerVersion(version, String(FIRMWARE_VERSION))) {
       KLog.print("[Update] ✓ New version available: ");
@@ -6406,6 +6367,7 @@ String checkForUpdates() {
 
 // Загрузка и установка обновления (прошивка и SPIFFS)
 bool downloadAndInstallUpdate(String version) {
+  OtaSafeSession safeSession;
   WiFiClientSecure client;
   HTTPClient http;
   
@@ -6435,7 +6397,7 @@ bool downloadAndInstallUpdate(String version) {
   
   // 1. Загружаем прошивку
   KLog.println("[Update] Step 1: Downloading firmware...");
-  if (!http.begin(client, GITHUB_FIRMWARE_URL)) {
+  if (!http.begin(client, String(GITHUB_FIRMWARE_URL) + "?version=" + version)) {
     KLog.println("[Update] Failed to connect to GitHub for firmware");
     updateProgress.message = "Нет связи с GitHub";
     saveOtaResult(OTA_RES_FAIL, FIRMWARE_VERSION, version.c_str(), updateProgress.message.c_str());
@@ -6637,6 +6599,7 @@ bool downloadAndInstallUpdate(String version) {
 
 // API: Проверка обновлений
 void handleUpdateCheck() {
+  server.sendHeader("Cache-Control", "no-store");
   KLog.println("[Update] API: Update check requested");
   
   // Проверяем WiFi
@@ -6644,7 +6607,7 @@ void handleUpdateCheck() {
     KLog.println("[Update] API: WiFi not connected");
     DynamicJsonDocument doc(256);
     doc["currentVersion"] = FIRMWARE_VERSION;
-    doc["latestVersion"] = FIRMWARE_VERSION;
+    doc["latestVersion"] = nullptr;
     doc["updateAvailable"] = false;
     doc["error"] = "WiFi not connected";
     String response;
@@ -6657,7 +6620,8 @@ void handleUpdateCheck() {
   
   DynamicJsonDocument doc(512);
   doc["currentVersion"] = FIRMWARE_VERSION;
-  doc["latestVersion"] = latestVersion.length() > 0 ? latestVersion : String(FIRMWARE_VERSION);
+  if (gUpdateCheckKind == 3) doc["latestVersion"] = nullptr;
+  else doc["latestVersion"] = latestVersion.length() > 0 ? latestVersion : String(FIRMWARE_VERSION);
   doc["updateAvailable"] = (latestVersion.length() > 0);
   
   // Пустой ответ при уже актуальной версии — не ошибка. Ошибка только если проверка не удалась.
@@ -6674,6 +6638,7 @@ void handleUpdateCheck() {
 
 // API: Установка обновления
 void handleUpdateInstall() {
+  OtaSafeSession safeSession;
   String latestVersion = checkForUpdates();
   
   if (latestVersion.length() == 0) {
@@ -7190,16 +7155,22 @@ void handleMLSettingsPost() {
 }
 
 // Инициализация OTA (Over The Air обновление)
+#ifndef KOTEL_IDE_OTA_PASSWORD
+#define KOTEL_IDE_OTA_PASSWORD ""
+#endif
 void setupOTA() {
+  // IDE upload is optional; GitHub/HTTP OTA remains available without a shared password.
+  if (strlen(KOTEL_IDE_OTA_PASSWORD) == 0) return;
   // Генерация уникального hostname на основе MAC адреса
   String hostname = "KotelESP32_" + WiFi.macAddress();
   hostname.replace(":", "");
   
   ArduinoOTA.setHostname(hostname.c_str());
-  ArduinoOTA.setPassword("kotel12345");  // Пароль для OTA обновления
+  ArduinoOTA.setPassword(KOTEL_IDE_OTA_PASSWORD);  // Пароль для OTA обновления
   
   // Обработчик начала обновления
   ArduinoOTA.onStart([]() {
+    beginOtaSafeMode();
     String type;
     if (ArduinoOTA.getCommand() == U_FLASH) {
       type = "sketch";
@@ -7243,6 +7214,7 @@ void setupOTA() {
   
   // Обработчик ошибок
   ArduinoOTA.onError([](ota_error_t error) {
+    endOtaSafeMode();
     // Ошибка OTA (отображается на дисплее)
     
     u8g2.clearBuffer();
@@ -7265,6 +7237,31 @@ void handleReboot() {
 }
 
 // API: Управление подбросом угля
+void handleEncoderLock() {
+  if (server.method() == HTTP_POST) {
+    DynamicJsonDocument request(128);
+    if (deserializeJson(request, server.arg("plain")) || !request["locked"].is<bool>()) {
+      server.send(400, "application/json", "{\"error\":\"locked must be boolean\"}"); return;
+    }
+    bool desired = request["locked"].as<bool>();
+    if (desired != encoderLocked) {
+      Preferences prefs;
+      bool saved = prefs.begin("encoder", false);
+      if (saved) { saved = prefs.putBool("locked", desired) == 1; prefs.end(); }
+      if (!saved) { server.send(500, "application/json", "{\"error\":\"save failed\"}"); return; }
+      portENTER_CRITICAL(&encoderMux);
+      encoderLocked = desired;
+      encoderPosition = 0; encoderQuarterSteps = 0;
+      lastEncoderState = (digitalRead(PIN_ENCODER_CLK) << 1) | digitalRead(PIN_ENCODER_DT);
+      encoderActivity = millis();
+      portEXIT_CRITICAL(&encoderMux);
+      ++encoderResetGeneration;
+      logEvent("ENCODER", desired ? "locked web" : "unlocked web");
+    }
+  }
+  server.send(200, "application/json", encoderLocked ? "{\"locked\":true}" : "{\"locked\":false}");
+}
+
 void handleCoalFeeding() {
   if (server.method() == HTTP_POST) {
     // Переключение подброса угля
@@ -7305,8 +7302,8 @@ void setup() {
   Serial.begin(115200);
 
   // Инициализация Watchdog Timer для обнаружения зависаний
-  // Таймаут: 120 секунд. Короткий сброс на старте откатывал OTA, не дождавшись Wi-Fi.
-  esp_task_wdt_init(120, true);  // 120 секунд, enable panic handler
+  // Таймаут: 150 секунд. Защита от зависания остаётся включённой.
+  esp_task_wdt_init(150, true);  // 150 секунд; panic/restart retained
   esp_task_wdt_add(NULL);  // Добавляем текущую задачу (loop) в watchdog
   {
     unsigned long warmup = millis();
@@ -7352,6 +7349,12 @@ void setup() {
   lastEncoderState = (initialClk << 1) | initialDt;
   lastValidEncoderState = lastEncoderState;
   
+  Preferences encoderPrefs;
+  if (encoderPrefs.begin("encoder", true)) {
+    encoderLocked = encoderPrefs.getBool("locked", true);
+    encoderPrefs.end();
+  }
+  encoderActivity = millis();
   // Настройка прерывания для энкодера (на оба пина)
   // Используем CHANGE для отслеживания всех изменений
   attachInterrupt(digitalPinToInterrupt(PIN_ENCODER_CLK), encoderISR, CHANGE);
@@ -7382,8 +7385,17 @@ void setup() {
   sensors2.setResolution(12);  // 12 бит = 0.0625°C точность
   sensors2.setWaitForConversion(false);  // Неблокирующий режим
   
-  // Инициализация EEPROM
-  EEPROM.begin(EEPROM_SIZE);
+  // SPIFFS до журнала событий и startup (events.log на файловой системе)
+  esp_task_wdt_reset();
+  if (!SPIFFS.begin(true)) {
+    KLog.println("[ОШИБКА] SPIFFS не смонтирован!");
+  } else {
+    loadEventLogFromSpiffs();
+    loadChartFromSpiffs();
+  }
+
+  // Migrate all JSON sections before legacy counters can overwrite overlapping data.
+  initializeSettingsStore();
   
   // Загрузка счетчика перезагрузок и получение причины перезагрузки
   loadBootCountFromEEPROM();
@@ -7403,6 +7415,9 @@ void setup() {
   
   // Загрузка настроек из EEPROM
   loadAutoSettingsFromEEPROM();
+  char setpointBootDetails[50];
+  snprintf(setpointBootDetails, sizeof(setpointBootDetails), "BOOT set=%.1fC dirty=%d", setpoint, autoSettingsDirty);
+  logEvent("SETPOINT", setpointBootDetails);
   loadMqttSettingsFromEEPROM();
   loadSensorMappingFromEEPROM();
   loadSystemEnabledFromEEPROM();
@@ -7414,15 +7429,13 @@ void setup() {
   loadFanStatsFromEEPROM();
   loadOtaResult();
   
-  // SPIFFS до журнала событий и startup (events.log на файловой системе)
-  esp_task_wdt_reset();
-  if (!SPIFFS.begin(true)) {
-    KLog.println("[ОШИБКА] SPIFFS не смонтирован!");
-  } else {
-    loadEventLogFromSpiffs();
-    loadChartFromSpiffs();
+  if (settingsStoreError) logEvent("SETTINGS_ERROR", "NVS: ошибка хранения");
+  if (settingsMigrationRejected) {
+    char message[48];
+    snprintf(message, sizeof(message), "Legacy rejected: %u", settingsMigrationRejected);
+    logEvent("SETTINGS_MIGRATE", message);
   }
-  
+
   // Определение состояния системы при запуске (всегда рабочий режим после питания)
   determineSystemStateOnStartup();
   
@@ -7534,10 +7547,12 @@ void setup() {
   server.on("/update", HTTP_POST, []() {
     server.sendHeader("Connection", "close");
     server.send(200, "text/plain", (Update.hasError()) ? "FAIL" : "OK");
-    ESP.restart();
+    if (!Update.hasError()) ESP.restart();
+    endOtaSafeMode();
   }, []() {
     HTTPUpload& upload = server.upload();
     if (upload.status == UPLOAD_FILE_START) {
+      beginOtaSafeMode();
       esp_task_wdt_reset();
       if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
         Update.printError(Serial);
@@ -7552,10 +7567,15 @@ void setup() {
       } else {
         Update.printError(Serial);
       }
+    } else if (upload.status == UPLOAD_FILE_ABORTED) {
+      Update.abort();
+      endOtaSafeMode();
     }
   });
   
   // API endpoints
+  server.on("/api/encoder/lock", HTTP_GET, handleEncoderLock);
+  server.on("/api/encoder/lock", HTTP_POST, handleEncoderLock);
   server.on("/api/status", HTTP_GET, handleStatus);
   server.on("/api/history", HTTP_GET, handleHistory);
   server.on("/api/diagnostics", HTTP_GET, handleDiagnostics);
@@ -7634,9 +7654,11 @@ void loop() {
   
   // Единая переменная времени для всего цикла (защита от переполнения millis())
   unsigned long now = millis();
+  serviceSupplyGuard(now);
   
   // Watchdog timer - сбрасываем каждый цикл для обнаружения зависаний
   esp_task_wdt_reset();
+  serviceAutoSettingsSave();  // Before potentially slow network operations.
   confirmOtaIfHealthy();
   servicePendingSpiffs();
   serviceWifiLink(now);
@@ -7665,6 +7687,7 @@ void loop() {
   
   // Обработка OTA обновлений (должен быть первым)
   ArduinoOTA.handle();
+  reconcileOtaResult();
   
   // mDNS обновляется автоматически, не требует явного вызова update()
 
@@ -7689,6 +7712,8 @@ void loop() {
   
   noteLoopStage("http");
   server.handleClient();
+  now = millis();
+  serviceSupplyGuard(now);
   
   // Отложенная запись журнала событий (FAN_ON/OFF)
   if (eventLogDirty && (now - lastEventLogFlush > 5000UL || now < lastEventLogFlush)) {
@@ -7830,7 +7855,7 @@ void loop() {
     if (fanState) {
       setFanDesired(false);
     }
-  } else if (systemEnabled && !manualFanControl && !ignitionInProgress) {
+  } else if (systemEnabled && !manualFanControl && !ignitionInProgress && !supplyGuard.fault && !otaSafeMode) {
     // Автоматическое управление вентилятором (не во время розжига — иначе shouldTurnOff гасит FAN сразу)
     static int lastWorkMode = -1;
     if (lastWorkMode != workMode) {
@@ -7886,7 +7911,7 @@ void loop() {
       }
       
       // 3. Проверка таймаута разогрева — SAFE STOP (FAN OFF + soft stop + coast)
-      if (heatingStartTime > 0 && fanState) {
+      if (heatingStartTime > 0 && fanState && uint32_t(now - supplyGuard.lastGood) <= SupplyGuard::sampleGapMs) {
         unsigned long heatingElapsed = ((now >= heatingStartTime) ? (now - heatingStartTime) : (ULONG_MAX - heatingStartTime + now)) / 60000;  // минуты
         if (heatingElapsed >= autoSettings.heatingTimeout) {
           if (supplyTemp < autoSettings.setpoint - 5) {
@@ -7908,7 +7933,7 @@ void loop() {
       
       // 4. Обнаружение прогорания угля → как погасание (FAN OFF + soft stop)
       static unsigned long lastCoalBurnedCheck = 0;
-      if (fanState && isSupplyTempValid() && (now - lastCoalBurnedCheck > 60000 || now < lastCoalBurnedCheck)) {
+      if (fanState && isSupplyTempValid() && uint32_t(now - supplyGuard.lastGood) <= SupplyGuard::sampleGapMs && (now - lastCoalBurnedCheck > 60000 || now < lastCoalBurnedCheck)) {
         lastCoalBurnedCheck = now;
         int trend = getTemperatureTrend(&supplyHistory);
         if (trend == -1) {
@@ -7955,11 +7980,17 @@ void loop() {
         KLog.println("[Безопасность] Восстановление после перегрева");
       }
       
-      // 6. Предупреждение о высокой температуре (maxTemp)
+      // 6. Предупреждение о высокой температуре (maxTemp).
+      // Раньше HIGH_TEMP не снимался, пока вентилятор сам не сменит состояние.
+      // После остывания ниже порога подача ещё выше точки включения вентилятора,
+      // и статус оставался «высокая температура».
       if (supplyTemp >= autoSettings.maxTemp && supplyTemp < autoSettings.overheatTemp) {
         if (systemState != "HEATING_TIMEOUT" && systemState != "COAL_BURNED" && systemState != "OVERHEAT") {
           systemState = "HIGH_TEMP";
         }
+      } else if (systemState == "HIGH_TEMP" && supplyTemp < autoSettings.maxTemp) {
+        systemState = fanState ? "HEATING" : "IDLE";
+        KLog.println("[Котел] Высокая температура снята");
       }
       
       // 7. Проверка погасания котла (только если не в режиме розжига)
@@ -8009,11 +8040,7 @@ void loop() {
     }
   }
   
-  // Отложенное сохранение в EEPROM (через 2 секунды после последнего изменения)
-  if (autoSettingsDirty && (now - lastAutoSettingsChange > 2000 || now < lastAutoSettingsChange)) {
-    saveAutoSettingsToEEPROM();
-    autoSettingsDirty = false;
-  }
+  serviceAutoSettingsSave();
   
   // Обновление дисплея (чаще при погасании — для мигания)
   static unsigned long lastDisplayUpdate = 0;
@@ -8030,10 +8057,11 @@ void loop() {
   
   // Обновление температур с датчиков (каждые 3 секунды для сбора данных за 30 секунд)
   static unsigned long lastTempUpdate = 0;
-  if (now - lastTempUpdate > 3000 || now < lastTempUpdate) {
-    lastTempUpdate = now;
+  if (tempRequestPending || now - lastTempUpdate >= 3000) {
+    if (!tempRequestPending) lastTempUpdate = now;
     noteLoopStage("temp");
     updateTemperatures();
+    serviceSupplyGuard(millis());
   }
   
   // Проверка обнаружения датчиков и автоматический сброс при отсутствии
@@ -8113,3 +8141,4 @@ void loop() {
   // Минимальная задержка для стабильности (уменьшена для лучшей отзывчивости)
   delay(1);
 }
+
