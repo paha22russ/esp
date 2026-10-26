@@ -57,7 +57,7 @@ extern "C" bool verifyRollbackLater() { return true; }
 #define EEPROM_ADDR_FAN_STATS 4400  // Статистика работы вентилятора (около 50 байт)
 
 // Версия прошивки
-#define FIRMWARE_VERSION "4.2.56"
+#define FIRMWARE_VERSION "4.2.57"
 #include "OtaResultPolicy.h"
 #include "SettingsStore.h"
 #define DISCOVERY_UDP_PORT 4210
@@ -1154,7 +1154,11 @@ bool saveAutoSettingsToEEPROM() {
   if (doc.overflowed() || (!writeSettingsJson("auto", json) || readSettingsJson("auto") != json)) {
     settingsStoreError = true;
     KLog.println("Settings write failed");
-    if (!autoSettingsSaveFailed) logEvent("SETTINGS_ERROR", "auto save failed; retry");
+    if (!autoSettingsSaveFailed) {
+      char details[80];
+      snprintf(details, sizeof(details), "auto save: %s; retry", settingsStoreLastError);
+      logEvent("SETTINGS_ERROR", details);
+    }
     autoSettingsSaveFailed = true;
     return false;
   }
@@ -4449,6 +4453,7 @@ void handleStatus() {
   doc["supplyLastGoodAgeMs"] = uint32_t(millis() - supplyGuard.lastGood);
   doc["otaSafeMode"] = otaSafeMode;
   doc["settingsStoreError"] = settingsStoreError;
+  if (autoSettingsSaveFailed) doc["settingsSaveError"] = settingsStoreLastError;
   doc["settingsMigrationRejected"] = settingsMigrationRejected;
   if (workMode == 1) {
     doc["comfortState"] = comfortState;
@@ -7387,7 +7392,7 @@ void setup() {
   
   // SPIFFS до журнала событий и startup (events.log на файловой системе)
   esp_task_wdt_reset();
-  if (!SPIFFS.begin(true)) {
+  if (!SPIFFS.begin(false)) {
     KLog.println("[ОШИБКА] SPIFFS не смонтирован!");
   } else {
     loadEventLogFromSpiffs();

@@ -1,0 +1,49 @@
+#include <ArduinoJson.h>
+#include <cassert>
+#include <cstdio>
+#include <climits>
+#include <string>
+#include <vector>
+using String = std::string;
+unsigned long clockMs=0;
+unsigned long millis() { return clockMs; }
+bool autoSettingsDirty=false, autoSettingsSaveFailed=false, settingsStoreError=false;
+unsigned long lastAutoSettingsChange=0, lastAutoSettingsAttempt=0;
+const size_t SETTINGS_JSON_MAX=4096;
+struct { float setpoint=42,minTemp=40,maxTemp=80,hysteresis=2,inertiaTemp=50;
+ int inertiaTime=10; float overheatTemp=77; int heatingTimeout=30; } autoSettings;
+float setpoint=42;
+struct { void println(const char*) {} } KLog;
+const char* settingsStoreLastError = "mock_failure";
+String stored;
+bool failWrite=false, corruptRead=false;
+int writes=0;
+std::vector<String> events;
+void logEvent(const char* type,const char*) { events.push_back(type); }
+bool writeSettingsJson(const char*,const String& value) {
+ ++writes; if(failWrite) return false; stored=value; return true;
+}
+String readSettingsJson(const char*) { return corruptRead ? "{}" : stored; }
+// PRODUCTION_FUNCTION
+int main() {
+ assert(saveAutoSettingsToEEPROM()); // Existing 42C.
+ autoSettings.setpoint=setpoint=50; autoSettingsDirty=true;
+ lastAutoSettingsChange=clockMs=100;
+ clockMs=2099; serviceAutoSettingsSave(); assert(writes==1);
+ failWrite=true; clockMs=2100; serviceAutoSettingsSave();
+ assert(autoSettingsDirty && autoSettingsSaveFailed && writes==2);
+ clockMs=7099; serviceAutoSettingsSave(); assert(writes==2);
+ failWrite=false; clockMs=7100; serviceAutoSettingsSave();
+ assert(!autoSettingsDirty && !autoSettingsSaveFailed && writes==3);
+ autoSettings.setpoint=setpoint=42; loadAutoSettingsFromEEPROM();
+ assert(setpoint==50 && autoSettings.setpoint==50); // Reboot restores latest.
+ autoSettings.setpoint=51; corruptRead=true;
+ assert(!saveAutoSettingsToEEPROM() && autoSettingsDirty);
+ corruptRead=false; clockMs+=5000; serviceAutoSettingsSave();
+ assert(!autoSettingsDirty);
+ autoSettings.setpoint=setpoint=42; loadAutoSettingsFromEEPROM(); assert(setpoint==51);
+ // Timer rollover does not lose a pending change.
+ lastAutoSettingsChange=ULONG_MAX-1000; clockMs=1000;
+ autoSettingsDirty=true; serviceAutoSettingsSave(); assert(!autoSettingsDirty);
+ assert(events.size()==4); // Failure/recovery once per episode, not every loop.
+}
